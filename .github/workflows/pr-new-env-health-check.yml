@@ -1,4 +1,4 @@
-name: PR New Environment
+name: Deploy Test Environment for Environment PR
 
 on:
   pull_request_target:
