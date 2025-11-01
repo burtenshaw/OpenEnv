@@ -142,7 +142,7 @@ jobs:
 
       - name: Wait for deployment to stabilize
         shell: bash
-        run: sleep 300
+        run: sleep 180
 
       - name: Perform environment health check
         shell: bash
