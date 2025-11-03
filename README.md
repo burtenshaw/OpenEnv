@@ -229,3 +229,5 @@ And we'd also like to acknowledge the team at Farama Foundation as the OpenEnv A
 ## License
 
 BSD 3-Clause License (see LICENSE file)
+
+
