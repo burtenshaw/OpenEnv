@@ -11,7 +11,7 @@ tags:
   - openenv
 ---
 
-# Echo Environment
+# Echo Environment [TEST]
 
 A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
 
