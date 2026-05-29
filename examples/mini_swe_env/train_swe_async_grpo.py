@@ -404,15 +404,21 @@ def _single_gpu_trainable_param_limit() -> int:
 
 def _model_context_limit(model_name: str) -> int:
     cfg = AutoConfig.from_pretrained(model_name)
-    candidates = [
-        getattr(cfg, "max_position_embeddings", None),
-        getattr(cfg, "model_max_length", None),
-        getattr(cfg, "max_seq_len", None),
-        getattr(cfg, "seq_length", None),
+    cfg_sections = [
+        cfg,
+        getattr(cfg, "text_config", None),
+        getattr(cfg, "llm_config", None),
     ]
-    for candidate in candidates:
-        if isinstance(candidate, int) and candidate > 0:
-            return candidate
+    for section in cfg_sections:
+        if section is None:
+            continue
+        for key in ("max_position_embeddings", "model_max_length", "max_seq_len", "seq_length"):
+            if isinstance(section, dict):
+                candidate = section.get(key)
+            else:
+                candidate = getattr(section, key, None)
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
     raise ValueError(
         f"Could not infer a positive context limit for model {model_name!r}"
     )
@@ -542,7 +548,12 @@ def _patched_async_grpo_model_loader(
 def _patch_lora_weight_streaming(trainer: AsyncGRPOTrainer) -> None:
     def _streaming_iter_with_merged_lora(self: AsyncGRPOTrainer):
         device = self.accelerator.device
-        model = self.model
+        unwrap_model = getattr(self.accelerator, "unwrap_model", None)
+        model = (
+            unwrap_model(self.model)
+            if callable(unwrap_model)
+            else self.model
+        )
         merge_adapter = getattr(model, "merge_adapter", None)
         unmerge_adapter = getattr(model, "unmerge_adapter", None)
         get_base_model = getattr(model, "get_base_model", None)
@@ -573,6 +584,44 @@ def _patch_lora_weight_streaming(trainer: AsyncGRPOTrainer) -> None:
     trainer._streaming_iter = types.MethodType(  # type: ignore[method-assign]
         _streaming_iter_with_merged_lora,
         trainer,
+    )
+
+
+def _patch_peft_lora_resume_tp_sharding_for_ddp(model: torch.nn.Module) -> None:
+    """Avoid PEFT's TP-only resume hook for ordinary DDP LoRA training."""
+    try:
+        import peft.utils.save_and_load as peft_save_and_load
+    except ImportError:
+        return
+
+    original = getattr(peft_save_and_load, "_maybe_shard_state_dict_for_tp", None)
+    if not callable(original) or getattr(original, "_swe_ddp_guard", False):
+        return
+
+    def _has_hf_tensor_parallel_plan(model_arg: torch.nn.Module) -> bool:
+        for module in model_arg.modules():
+            get_base_layer = getattr(module, "get_base_layer", None)
+            base_layer = get_base_layer() if callable(get_base_layer) else module
+            if (
+                getattr(base_layer, "_hf_tp_plan", None) is not None
+                and getattr(base_layer, "_hf_device_mesh", None) is not None
+            ):
+                return True
+        return False
+
+    def _guarded_maybe_shard_state_dict_for_tp(
+        model_arg: torch.nn.Module,
+        state_dict: dict[str, torch.Tensor],
+        adapter_name: str,
+    ) -> None:
+        if _has_hf_tensor_parallel_plan(model_arg):
+            return original(model_arg, state_dict, adapter_name)
+        return None
+
+    _guarded_maybe_shard_state_dict_for_tp._swe_ddp_guard = True  # type: ignore[attr-defined]
+    _guarded_maybe_shard_state_dict_for_tp._swe_original = original  # type: ignore[attr-defined]
+    peft_save_and_load._maybe_shard_state_dict_for_tp = (  # type: ignore[method-assign]
+        _guarded_maybe_shard_state_dict_for_tp
     )
 
 
@@ -882,6 +931,16 @@ def main() -> int:
                 "dispatch_batches": True,
             },
         }
+        async_grpo_args.update(
+            _filter_async_grpo_kwargs(
+                {
+                    # PEFT LoRA + DDP can mark the same adapter parameter ready
+                    # twice with reentrant checkpointing during GRPO backward.
+                    "gradient_checkpointing_kwargs": {"use_reentrant": False},
+                    "ddp_find_unused_parameters": False,
+                }
+            )
+        )
         filtered_checkpoint_args = _filter_async_grpo_kwargs(checkpoint_args)
         async_grpo_args.update(filtered_checkpoint_args)
 
@@ -911,13 +970,8 @@ def main() -> int:
         trainable_params = _count_trainable_parameters(trainer.model)
         trainer_world_size = trainer.accelerator.num_processes
         if lora_config is not None:
-            if trainer_world_size != 1:
-                raise RuntimeError(
-                    "SWE_LORA currently supports a single trainer process in this "
-                    "example so merged adapter weights can be streamed to vLLM from "
-                    "rank 0."
-                )
             _patch_lora_weight_streaming(trainer)
+            _patch_peft_lora_resume_tp_sharding_for_ddp(trainer.model)
             _patch_chunked_lm_head_for_wrapped_causal_lm(
                 trainer.model,
                 temperature=args.temperature,

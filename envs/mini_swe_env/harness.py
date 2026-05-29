@@ -80,6 +80,32 @@ TESTBED = "/testbed"
 
 VERIFY_TIMEOUT_S = 300
 SETUP_TIMEOUT_S = 600
+DEFAULT_GIT_CHECKOUT_TIMEOUT_S = 300
+
+
+def _git_checkout_timeout_s() -> int:
+    for name in ("SWE_GIT_CHECKOUT_TIMEOUT_S", "SWE_LOCAL_GIT_CHECKOUT_TIMEOUT_S"):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            timeout_s = int(value)
+        except ValueError:
+            _log.warning(
+                "%s must be an integer; using %ss",
+                name,
+                DEFAULT_GIT_CHECKOUT_TIMEOUT_S,
+            )
+            return DEFAULT_GIT_CHECKOUT_TIMEOUT_S
+        if timeout_s > 0:
+            return timeout_s
+        _log.warning(
+            "%s must be positive; using %ss",
+            name,
+            DEFAULT_GIT_CHECKOUT_TIMEOUT_S,
+        )
+        return DEFAULT_GIT_CHECKOUT_TIMEOUT_S
+    return DEFAULT_GIT_CHECKOUT_TIMEOUT_S
 
 _ANSWER_TOOL_DEFINITION = {
     "type": "function",
@@ -696,7 +722,7 @@ class SWESessionFactory(ResourceSessionFactory):
         r = sandbox.exec(
             f"git checkout --quiet {task.base_commit}",
             cwd=workdir,
-            timeout=60,
+            timeout=_git_checkout_timeout_s(),
         )
         if r.exit_code != 0:
             raise RuntimeError(

@@ -16,9 +16,12 @@ import examples.mini_swe_env.train_swe_async_grpo as train_mod
 from examples.mini_swe_env.train_swe_async_grpo import (
     _chunked_logprob_backbone,
     _default_lora_target_modules,
+    _filter_async_grpo_kwargs,
     _lora_config_from_env,
     _model_context_limit,
     _patch_chunked_lm_head_for_wrapped_causal_lm,
+    _patch_lora_weight_streaming,
+    _patch_peft_lora_resume_tp_sharding_for_ddp,
     _select_task_indices,
     _sanitize_lora_merged_weight_name,
 )
@@ -76,6 +79,28 @@ def test_model_context_limit_prefers_first_positive_candidate(
     assert _model_context_limit("Qwen/Qwen3-8B") == 40960
 
 
+def test_model_context_limit_reads_nested_text_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _TextCfg:
+        max_position_embeddings = 262144
+
+    class _Cfg:
+        max_position_embeddings = None
+        model_max_length = None
+        max_seq_len = None
+        seq_length = None
+        text_config = _TextCfg()
+
+    monkeypatch.setattr(
+        train_mod.AutoConfig,
+        "from_pretrained",
+        lambda model_name: _Cfg(),
+    )
+
+    assert _model_context_limit("Qwen/Qwen3.5-4B") == 262144
+
+
 def test_model_context_limit_rejects_missing_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,6 +130,20 @@ def test_default_lora_target_modules_for_qwen() -> None:
         "up_proj",
         "down_proj",
     )
+
+
+def test_filter_async_grpo_kwargs_accepts_ddp_lora_checkpointing_controls() -> None:
+    filtered = _filter_async_grpo_kwargs(
+        {
+            "gradient_checkpointing_kwargs": {"use_reentrant": False},
+            "ddp_find_unused_parameters": False,
+            "not_a_training_arg": True,
+        }
+    )
+
+    assert filtered["gradient_checkpointing_kwargs"] == {"use_reentrant": False}
+    assert filtered["ddp_find_unused_parameters"] is False
+    assert "not_a_training_arg" not in filtered
 
 
 def test_sanitize_lora_merged_weight_name_strips_wrapper_paths() -> None:
@@ -191,3 +230,111 @@ def test_patch_chunked_lm_head_for_wrapped_causal_lm_handles_peft_model() -> Non
 
     assert outputs["log_probs"].shape == (2, 7)
     assert outputs["entropy"].shape == (2, 7)
+
+
+def test_patch_lora_weight_streaming_unwraps_distributed_model() -> None:
+    cfg = Qwen3Config(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+    )
+    peft_model = get_peft_model(
+        Qwen3ForCausalLM(cfg),
+        LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=4,
+            lora_alpha=8,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+        ),
+    )
+
+    class _Wrapped(torch.nn.Module):
+        def __init__(self, module: torch.nn.Module) -> None:
+            super().__init__()
+            self.module = module
+
+    class _Accelerator:
+        device = torch.device("cpu")
+
+        @staticmethod
+        def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+            return model.module
+
+    class _Trainer:
+        model = _Wrapped(peft_model)
+        accelerator = _Accelerator()
+
+    trainer = _Trainer()
+    _patch_lora_weight_streaming(trainer)  # type: ignore[arg-type]
+    streamed = dict(trainer._streaming_iter())  # type: ignore[attr-defined]
+
+    assert any(name.endswith("self_attn.q_proj.weight") for name in streamed)
+    assert all(".lora_" not in name for name in streamed)
+
+
+def test_patch_peft_lora_resume_tp_sharding_skips_plain_ddp_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import peft.utils.save_and_load as save_and_load
+
+    def _raise_if_called(
+        model: torch.nn.Module,
+        state_dict: dict[str, torch.Tensor],
+        adapter_name: str,
+    ) -> None:
+        raise AssertionError("TP sharding should not run for plain DDP models")
+
+    monkeypatch.setattr(
+        save_and_load,
+        "_maybe_shard_state_dict_for_tp",
+        _raise_if_called,
+    )
+
+    model = torch.nn.Linear(2, 2)
+    _patch_peft_lora_resume_tp_sharding_for_ddp(model)
+    save_and_load._maybe_shard_state_dict_for_tp(model, {}, "default")
+
+
+def test_patch_peft_lora_resume_tp_sharding_preserves_tp_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import peft.utils.save_and_load as save_and_load
+
+    called = False
+
+    def _mark_called(
+        model: torch.nn.Module,
+        state_dict: dict[str, torch.Tensor],
+        adapter_name: str,
+    ) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        save_and_load,
+        "_maybe_shard_state_dict_for_tp",
+        _mark_called,
+    )
+
+    class _Base(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self._hf_tp_plan = "colwise"
+            self._hf_device_mesh = object()
+
+    class _LoraLike(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.base = _Base()
+
+        def get_base_layer(self) -> torch.nn.Module:
+            return self.base
+
+    model = _LoraLike()
+    _patch_peft_lora_resume_tp_sharding_for_ddp(model)
+    save_and_load._maybe_shard_state_dict_for_tp(model, {}, "default")
+
+    assert called

@@ -7,6 +7,9 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+_ENVS = _ROOT / "envs"
+if str(_ENVS) not in sys.path:
+    sys.path.insert(0, str(_ENVS))
 
 from mini_swe_env.grading import GradingError, grade_from_case_results
 from mini_swe_env.harness import (
@@ -152,3 +155,28 @@ def test_list_changed_test_paths_filters_to_test_like_files() -> None:
         "testing/helpers/new_case.py",
         "tests/test_ssm/test_ssm_boto3.py",
     ]
+
+
+def test_prepare_repo_uses_configurable_checkout_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("SWE_GIT_CHECKOUT_TIMEOUT_S", "240")
+    calls = []
+
+    class _Sandbox:
+        def exec(self, cmd: str, *, cwd=None, timeout=None):  # type: ignore[no-untyped-def]
+            calls.append((cmd, cwd, timeout))
+            return ExecResult(exit_code=0, stdout="", stderr="")
+
+    task = SimpleNamespace(repo="demo/repo", base_commit="deadbeef")
+
+    SWESessionFactory._prepare_repo(
+        object(),
+        _Sandbox(),
+        task,
+        workdir="/testbed",
+    )
+
+    assert (
+        "git checkout --quiet deadbeef",
+        "/testbed",
+        240,
+    ) in calls

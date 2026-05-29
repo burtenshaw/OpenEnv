@@ -711,9 +711,20 @@ class SWERolloutWorker:
                     intercept = pending_intercept
                     pending_intercept = None
                 else:
-                    intercept = await session.next_request(
-                        timeout_s=self._cfg.request_timeout_s,
-                    )
+                    try:
+                        intercept = await session.next_request(
+                            timeout_s=self._cfg.request_timeout_s,
+                        )
+                    except TimeoutError:
+                        if turns == 0:
+                            raise
+                        rollout_stop_reason = "request_idle_timeout"
+                        _log.info(
+                            "rollout request idle-timeout: instance_id=%s turns=%d",
+                            task.instance_id,
+                            turns,
+                        )
+                        break
                 if intercept is None:
                     rollout_stop_reason = "agent_exit_detected"
                     break
@@ -826,6 +837,9 @@ class SWERolloutWorker:
                             "idle_after_terminal_stop",
                             "agent_exit_after_terminal_stop",
                         }
+                    ),
+                    "request_idle_timeout": float(
+                        rollout_stop_reason == "request_idle_timeout"
                     ),
                     "wall_s": round(time.time() - t0, 3),
                     "n_tokens": float(len(all_ids)),

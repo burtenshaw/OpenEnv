@@ -1,14 +1,19 @@
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+for _p in (_ROOT, _ROOT / "src", _ROOT / "envs"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from examples.mini_swe_env.async_grpo.rollout_worker import (
     _OMITTED_TOOL_OUTPUT_MARKER,
+    SWERolloutWorker,
+    WorkerConfig,
     _clamp_max_completion_tokens,
     _compute_group_advantages,
     _coerce_token_ids,
@@ -28,6 +33,94 @@ from examples.mini_swe_env.async_grpo.rollout_worker import (
     _truncate_messages_for_prompt_budget,
     _truncate_text_middle,
 )
+
+
+def test_rollout_grades_partial_work_on_request_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(SWERolloutWorker, "_init_weight_transfer", lambda self: None)
+
+    class _Session:
+        answer_called = False
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.delivered = []
+            self.closed = False
+
+        async def next_request(self, timeout_s: float) -> dict[str, object] | None:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "messages": [{"role": "user", "content": "fix it"}],
+                    "body": {},
+                }
+            raise TimeoutError("no request within timeout")
+
+        async def deliver(
+            self,
+            intercept: dict[str, object],
+            response: dict[str, object],
+        ) -> None:
+            self.delivered.append((intercept, response))
+
+        def verify(self, transcript: list[object]) -> object:
+            return SimpleNamespace(env_reward=0.5)
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = _Session()
+
+    class _Factory:
+        def create(self, *, task: object, episode_id: str) -> _Session:
+            return session
+
+    class _Tokenizer:
+        pad_token_id = 0
+
+        def apply_chat_template(self, messages: object, **kwargs: object) -> list[int]:
+            return [10, 11]
+
+    worker = SWERolloutWorker(
+        session_factory=_Factory(),
+        tasks=[SimpleNamespace(instance_id="repo__issue-1", instruction="fix it")],
+        tokenizer=_Tokenizer(),
+        vllm_base_url="http://vllm",
+        vllm_api_key="token",
+        vllm_model="model",
+        config=WorkerConfig(request_timeout_s=0.01),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_generate",
+        lambda **kwargs: (
+            [10, 11],
+            [12, 13],
+            [-0.2, -0.3],
+            _make_chat_response(
+                {"role": "assistant", "content": "ran a command"},
+                model="model",
+                finish_reason="tool_calls",
+            ),
+            "tool_calls",
+        ),
+    )
+
+    sample = asyncio.run(
+        worker._rollout(  # type: ignore[attr-defined]
+            worker._tasks[0],
+            "episode-1",
+            model_version=3,
+        )
+    )
+
+    assert sample is not None
+    assert sample.reward == pytest.approx(0.5)
+    assert sample.model_version == 3
+    assert sample.metrics["turns"] == 1.0
+    assert sample.metrics["request_idle_timeout"] == 1.0
+    assert session.closed is True
 
 
 def test_normalize_tool_calls_serializes_arguments_to_json_string() -> None:

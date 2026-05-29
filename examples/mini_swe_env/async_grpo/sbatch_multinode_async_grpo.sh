@@ -52,11 +52,14 @@ from transformers import AutoConfig
 import os
 
 cfg = AutoConfig.from_pretrained(os.environ["SWE_MODEL"])
-for key in ("max_position_embeddings", "model_max_length", "max_seq_len", "seq_length"):
-    value = getattr(cfg, key, None)
-    if isinstance(value, int) and value > 0:
-        print(value)
-        break
+for section in (cfg, getattr(cfg, "text_config", None), getattr(cfg, "llm_config", None)):
+    if section is None:
+        continue
+    for key in ("max_position_embeddings", "model_max_length", "max_seq_len", "seq_length"):
+        value = section.get(key) if isinstance(section, dict) else getattr(section, key, None)
+        if isinstance(value, int) and value > 0:
+            print(value)
+            raise SystemExit(0)
 PY
   )
 fi
@@ -82,6 +85,27 @@ if [[ -z "$VLLM_TOOL_CALL_PARSER" ]]; then
       ;;
   esac
 fi
+
+SWE_CUDA_HOME=${SWE_CUDA_HOME:-}
+if [[ -z "$SWE_CUDA_HOME" ]]; then
+  case "$MODEL_LOWER" in
+    *qwen3.5*|*qwen3_5*)
+      if [[ -d /usr/local/cuda-12.4 ]]; then
+        SWE_CUDA_HOME=/usr/local/cuda-12.4
+      fi
+      ;;
+  esac
+fi
+
+SWE_VLLM_GDN_PREFILL_BACKEND=${SWE_VLLM_GDN_PREFILL_BACKEND:-}
+if [[ -z "$SWE_VLLM_GDN_PREFILL_BACKEND" ]]; then
+  case "$MODEL_LOWER" in
+    *qwen3.5*|*qwen3_5*)
+      SWE_VLLM_GDN_PREFILL_BACKEND=triton
+      ;;
+  esac
+fi
+SWE_VLLM_EXTRA_ARGS=${SWE_VLLM_EXTRA_ARGS:-}
 
 mkdir -p "$RUN_DIR/home"
 cd "$REPO_ROOT"
@@ -134,6 +158,7 @@ export XDG_CACHE_HOME=/fsx/benjamin_burtenshaw/.cache
 export TORCH_HOME=/fsx/benjamin_burtenshaw/.cache/torch
 export TRITON_CACHE_DIR=/fsx/benjamin_burtenshaw/.cache/triton
 export FLASHINFER_CACHE_DIR=/fsx/benjamin_burtenshaw/.cache/flashinfer
+export FLASHINFER_WORKSPACE_BASE=${FLASHINFER_WORKSPACE_BASE:-/tmp/${USER}/flashinfer-workspace-${SLURM_JOB_ID:-manual}}
 export PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE:-1}
 export PYTHONPYCACHEPREFIX=${PYTHONPYCACHEPREFIX:-/tmp/${USER}/openenv-pycache}
 export VLLM_NO_USAGE_STATS=1
@@ -168,17 +193,26 @@ export SWE_HF_SANDBOX_CREATE_RETRIES=${SWE_HF_SANDBOX_CREATE_RETRIES:-6}
 export SWE_HF_SANDBOX_CREATE_BACKOFF_S=${SWE_HF_SANDBOX_CREATE_BACKOFF_S:-20}
 export OPENENV_HF_SANDBOX_URL_TIMEOUT_S=${OPENENV_HF_SANDBOX_URL_TIMEOUT_S:-120}
 export SWE_ROLLOUT_QUEUE_TIMEOUT_S=${SWE_ROLLOUT_QUEUE_TIMEOUT_S:-900}
+export SWE_ROLLOUT_REQUEST_TIMEOUT_S=${SWE_ROLLOUT_REQUEST_TIMEOUT_S:-120}
 export SWE_ROLLOUT_FAILURE_BACKOFF_S=${SWE_ROLLOUT_FAILURE_BACKOFF_S:-30}
 export SWE_ROLLOUT_MAX_ATTEMPTS=${SWE_ROLLOUT_MAX_ATTEMPTS:-4}
+export SWE_GIT_CHECKOUT_TIMEOUT_S=${SWE_GIT_CHECKOUT_TIMEOUT_S:-300}
 export SWE_DISABLE_WEIGHT_TRANSFER=${SWE_DISABLE_WEIGHT_TRANSFER:-0}
 export VLLM_TOOL_CALL_PARSER
+export SWE_CUDA_HOME SWE_VLLM_GDN_PREFILL_BACKEND SWE_VLLM_EXTRA_ARGS
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
-export OPENENV_LOCAL_SANDBOX_ROOT=${OPENENV_LOCAL_SANDBOX_ROOT:-$RUN_DIR/local_sandboxes}
+export OPENENV_LOCAL_SANDBOX_ROOT=${OPENENV_LOCAL_SANDBOX_ROOT:-/tmp/${USER}/openenv-local-sandboxes-${SLURM_JOB_ID:-manual}}
 export OPENENV_LOCAL_SANDBOX_PRESERVE=${OPENENV_LOCAL_SANDBOX_PRESERVE:-0}
-mkdir -p "$OPENENV_LOCAL_SANDBOX_ROOT"
+if [[ -n "$SWE_CUDA_HOME" ]]; then
+  export CUDA_HOME="$SWE_CUDA_HOME"
+  export CUDA_PATH="$SWE_CUDA_HOME"
+  export PATH="$SWE_CUDA_HOME/bin:$PATH"
+  export LD_LIBRARY_PATH="$SWE_CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+fi
+mkdir -p "$OPENENV_LOCAL_SANDBOX_ROOT" "$FLASHINFER_WORKSPACE_BASE"
 
 VLLM_STEP_PID=
 CLOUDFLARED_PID=
@@ -200,7 +234,7 @@ echo "run_dir=$RUN_DIR"
 echo "nodes=${ALLOC_NODES[*]}"
 echo "vllm_node=$VLLM_NODE trainer_nodes=$TRAINER_NODELIST trainer_master=$TRAINER_MASTER"
 echo "ports=vllm:$VLLM_PORT interception:$INTERCEPTION_PORT master:$MASTER_PORT"
-echo "model=$SWE_MODEL agent=$SWE_AGENT parser=${VLLM_TOOL_CALL_PARSER:-none} sandbox=$SWE_SANDBOX_BACKEND dtype=$SWE_TRAIN_DTYPE lora=$SWE_LORA max_model_len=$MAX_MODEL_LEN max_tasks=$MAX_TASKS max_steps=$MAX_STEPS max_turns=$MAX_TURNS inflight=$SWE_ROLLOUT_MAX_INFLIGHT staleness=$SWE_ASYNC_MAX_STALENESS preserve_local=$OPENENV_LOCAL_SANDBOX_PRESERVE"
+echo "model=$SWE_MODEL agent=$SWE_AGENT parser=${VLLM_TOOL_CALL_PARSER:-none} sandbox=$SWE_SANDBOX_BACKEND dtype=$SWE_TRAIN_DTYPE lora=$SWE_LORA max_model_len=$MAX_MODEL_LEN max_tasks=$MAX_TASKS max_steps=$MAX_STEPS max_turns=$MAX_TURNS inflight=$SWE_ROLLOUT_MAX_INFLIGHT staleness=$SWE_ASYNC_MAX_STALENESS preserve_local=$OPENENV_LOCAL_SANDBOX_PRESERVE cuda_home=${CUDA_HOME:-none} gdn_prefill_backend=${SWE_VLLM_GDN_PREFILL_BACKEND:-default}"
 
 : > "$RUN_DIR/vllm.log"
 : > "$RUN_DIR/trainer.log"
@@ -224,6 +258,14 @@ srun \
     if [[ -n "${VLLM_TOOL_CALL_PARSER:-}" ]]; then
       TOOL_ARGS+=(--enable-auto-tool-choice --tool-call-parser "$VLLM_TOOL_CALL_PARSER")
     fi
+    GDN_ARGS=()
+    if [[ -n "${SWE_VLLM_GDN_PREFILL_BACKEND:-}" ]]; then
+      GDN_ARGS+=(--gdn-prefill-backend "$SWE_VLLM_GDN_PREFILL_BACKEND")
+    fi
+    EXTRA_ARGS=()
+    if [[ -n "${SWE_VLLM_EXTRA_ARGS:-}" ]]; then
+      read -r -a EXTRA_ARGS <<< "$SWE_VLLM_EXTRA_ARGS"
+    fi
     exec .venv/bin/vllm serve "$SWE_MODEL" \
       --tensor-parallel-size "$GPUS_PER_NODE" \
       --max-model-len "$MAX_MODEL_LEN" \
@@ -233,7 +275,9 @@ srun \
       --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
       --logprobs-mode processed_logprobs \
       --weight-transfer-config '\''{"backend":"nccl"}'\'' \
-      "${TOOL_ARGS[@]}"
+      "${TOOL_ARGS[@]}" \
+      "${GDN_ARGS[@]}" \
+      "${EXTRA_ARGS[@]}"
   ' > "$RUN_DIR/vllm.log" 2>&1 &
 VLLM_STEP_PID=$!
 
@@ -341,6 +385,8 @@ echo "$INTERCEPTION_BASE_URL" > "$RUN_DIR/interception_base_url.txt"
   echo "SWE_ENABLE_ANSWER_TOOL=${SWE_ENABLE_ANSWER_TOOL:-}"
   echo "SWE_ROLLOUT_MAX_INFLIGHT=$SWE_ROLLOUT_MAX_INFLIGHT"
   echo "SWE_ROLLOUT_MAX_ATTEMPTS=$SWE_ROLLOUT_MAX_ATTEMPTS"
+  echo "SWE_ROLLOUT_REQUEST_TIMEOUT_S=$SWE_ROLLOUT_REQUEST_TIMEOUT_S"
+  echo "SWE_GIT_CHECKOUT_TIMEOUT_S=$SWE_GIT_CHECKOUT_TIMEOUT_S"
   echo "SWE_VLLM_MAX_MODEL_LEN=$SWE_VLLM_MAX_MODEL_LEN"
   echo "SWE_TRAIN_DTYPE=$SWE_TRAIN_DTYPE"
   echo "SWE_LORA=$SWE_LORA"
@@ -354,6 +400,7 @@ echo "$INTERCEPTION_BASE_URL" > "$RUN_DIR/interception_base_url.txt"
   echo "SWE_TORCH_EMPTY_CACHE_STEPS=$SWE_TORCH_EMPTY_CACHE_STEPS"
   echo "VLLM_TOOL_CALL_PARSER=${VLLM_TOOL_CALL_PARSER:-}"
   echo "SWE_DISABLE_WEIGHT_TRANSFER=$SWE_DISABLE_WEIGHT_TRANSFER"
+  echo "OPENENV_LOCAL_SANDBOX_ROOT=$OPENENV_LOCAL_SANDBOX_ROOT"
 } > "$RUN_DIR/run.env"
 
 echo "starting_trainer=$(date -Is)"
