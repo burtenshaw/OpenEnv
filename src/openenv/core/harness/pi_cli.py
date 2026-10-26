@@ -185,7 +185,9 @@ class PiCLIHarnessAdapter(CLIHarnessAdapter):
                     raise ValueError("model is required when model_base_url is set")
                 env["OPENENV_PI_MODEL_BASE_URL"] = self._model_base_url
                 env["OPENENV_PI_MODEL_ID"] = self._model
-                env["OPENENV_PI_MODEL_PROVIDER"] = self._provider or self._model_provider
+                env["OPENENV_PI_MODEL_PROVIDER"] = (
+                    self._provider or self._model_provider
+                )
                 env["OPENENV_PI_MODEL_API_KEY"] = self._model_api_key
 
             command = [

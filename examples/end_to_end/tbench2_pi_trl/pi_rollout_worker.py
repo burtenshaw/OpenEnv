@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Iterator, Sequence, cast
+from typing import Any, Callable, cast, Iterator, Sequence
 
 import requests
 from openenv.core.harness import HarnessRunLimits
@@ -88,7 +88,9 @@ class WorkerConfig:
 class InterceptionServer:
     """Minimal OpenAI-compatible gate for PI chat completion requests."""
 
-    def __init__(self, *, host: str = "127.0.0.1", port: int = 0, secret: str = "openenv"):
+    def __init__(
+        self, *, host: str = "127.0.0.1", port: int = 0, secret: str = "openenv"
+    ):
         self.host = host
         self.port = port
         self.secret = secret
@@ -241,7 +243,9 @@ class InterceptionServer:
                     message = choice.get("message") or {}
                     tool_calls = [
                         {"index": index, **tool_call}
-                        for index, tool_call in enumerate(message.get("tool_calls") or [])
+                        for index, tool_call in enumerate(
+                            message.get("tool_calls") or []
+                        )
                     ]
                     self._sse_data(
                         {
@@ -272,7 +276,8 @@ class InterceptionServer:
                                 {
                                     "index": choice.get("index", 0),
                                     "delta": {},
-                                    "finish_reason": choice.get("finish_reason") or "stop",
+                                    "finish_reason": choice.get("finish_reason")
+                                    or "stop",
                                 }
                             ],
                         }
@@ -311,7 +316,9 @@ class TerminusPiRolloutWorker:
             try:
                 self._tokenizer = add_response_schema(tokenizer)
             except Exception:
-                logger.debug("could not add response schema to tokenizer", exc_info=True)
+                logger.debug(
+                    "could not add response schema to tokenizer", exc_info=True
+                )
         self._chat_template = None
         if (
             get_training_chat_template is not None
@@ -613,7 +620,9 @@ class TerminusPiRolloutWorker:
             except BaseException as exc:  # noqa: BLE001
                 error_box.append(exc)
 
-        pi_thread = threading.Thread(target=run_pi, daemon=True, name=f"pi-{rollout_id}")
+        pi_thread = threading.Thread(
+            target=run_pi, daemon=True, name=f"pi-{rollout_id}"
+        )
         pi_thread.start()
 
         all_ids: list[int] = []
@@ -648,7 +657,9 @@ class TerminusPiRolloutWorker:
                     all_mask.extend([0] * len(suffix))
                     all_logprobs.extend([0.0] * len(suffix))
 
-                turn_ids, turn_logprobs, text, finish_reason = self._generate(prompt_ids)
+                turn_ids, turn_logprobs, text, finish_reason = self._generate(
+                    prompt_ids
+                )
                 all_ids.extend(turn_ids)
                 all_mask.extend([1] * len(turn_ids))
                 all_logprobs.extend(turn_logprobs)
@@ -731,12 +742,18 @@ class TerminusPiRolloutWorker:
         if tools:
             kwargs["tools"] = tools
         try:
-            return cast(list[int], self._tokenizer.apply_chat_template(messages, **kwargs))
+            return cast(
+                list[int], self._tokenizer.apply_chat_template(messages, **kwargs)
+            )
         except TypeError:
             kwargs.pop("tools", None)
-            return cast(list[int], self._tokenizer.apply_chat_template(messages, **kwargs))
+            return cast(
+                list[int], self._tokenizer.apply_chat_template(messages, **kwargs)
+            )
 
-    def _generate(self, prompt_ids: list[int]) -> tuple[list[int], list[float], str, str | None]:
+    def _generate(
+        self, prompt_ids: list[int]
+    ) -> tuple[list[int], list[float], str, str | None]:
         response = requests.post(
             f"{self._vllm_base_url}/v1/completions",
             headers={

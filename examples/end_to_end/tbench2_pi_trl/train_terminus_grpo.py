@@ -27,12 +27,11 @@ from pathlib import Path
 
 from datasets import load_dataset
 from huggingface_hub import HfApi
+from pi_rollout_worker import TerminusPiRolloutWorker, WorkerConfig
 from terminus_env.client import TerminusEnv
 from terminus_env.harness import TerminusSessionFactory
 from transformers import AutoTokenizer, TrainerCallback
 from trl.experimental.async_grpo import AsyncGRPOConfig, AsyncGRPOTrainer
-
-from pi_rollout_worker import TerminusPiRolloutWorker, WorkerConfig
 
 TASK_DATASET_ID = "burtenshaw/terminus-pi-trl-hard-tasks"
 MODEL = "Qwen/Qwen3.5-4B"
