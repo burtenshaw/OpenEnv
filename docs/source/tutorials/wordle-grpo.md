@@ -1,6 +1,6 @@
-# OpenEnv Wordle with GRPO using TRL
+# Play Wordle with GRPO
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/trl/blob/main/examples/notebooks/openenv_wordle_grpo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/trl/blob/main/examples/grpo_wordle/grpo_wordle.ipynb)
 
 ![trl banner](https://huggingface.co/datasets/trl-lib/documentation-images/resolve/main/trl_banner_dark.png)
 
@@ -10,11 +10,11 @@ With [**Transformers Reinforcement Learning (TRL)**](https://github.com/huggingf
 - [TRL GitHub Repository](https://github.com/huggingface/trl) -- star us to support the project!
 - [Official TRL Examples](https://huggingface.co/docs/trl/example_overview)
 - [Community Tutorials](https://huggingface.co/docs/trl/community_tutorials)
-- [OpenEnv](https://github.com/meta-pytorch/OpenEnv)
+- [OpenEnv](https://github.com/huggingface/OpenEnv)
 
 
 An **agentic environment** is a setting where a model can take actions, observe outcomes, and adjust its behavior based on feedback, similar to how humans learn from trial and error.
-In this case, the agent interacts with the **Wordle** environment through the [**OpenEnv**](https://github.com/meta-pytorch/OpenEnv) framework, which standardizes multi-agent and RL-style text environments.
+In this case, the agent interacts with the **Wordle** environment through the [**OpenEnv**](https://github.com/huggingface/OpenEnv) framework, which standardizes multi-agent and RL-style text environments.
 
 [Wordle](https://en.wikipedia.org/wiki/Wordle) is a popular word puzzle where the player must guess a secret five-letter word within six tries.
 After each guess, feedback indicates whether each letter is:
@@ -283,7 +283,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 model_name = "sergiopaniego/wordle-grpo-Qwen3-1.7B"  # Replace with your HF username or organization
 
-fine_tuned_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="float32", device_map="auto")
+fine_tuned_model = AutoModelForCausalLM.from_pretrained(model_name, dtype="float32", device_map="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 ```
 

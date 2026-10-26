@@ -43,11 +43,11 @@ import os
 try:
     from openenv.core.env_server.http_server import create_app
 
-    from ..models import REPLAction, REPLObservation
+    from ..models import REPLAction, REPLObservation, REPLState
     from .gradio_ui import build_repl_gradio_app
     from .repl_environment import REPLEnvironment
 except ImportError:
-    from models import REPLAction, REPLObservation
+    from models import REPLAction, REPLObservation, REPLState
     from openenv.core.env_server.http_server import create_app
     from server.gradio_ui import build_repl_gradio_app
     from server.repl_environment import REPLEnvironment
@@ -96,7 +96,7 @@ def create_repl_environment() -> REPLEnvironment:
 # Create the app with web interface and README integration.
 _sig = inspect.signature(create_app)
 if "gradio_builder" in _sig.parameters:
-    # Each kwarg is guarded by inspect.signature so older openenv-core
+    # Each kwarg is guarded by inspect.signature so older openenv
     # releases that predate the param still boot this env.
     create_app_kwargs: dict = {
         "env_name": "repl_env",
@@ -113,6 +113,8 @@ if "gradio_builder" in _sig.parameters:
         create_app_kwargs["title_override"] = (
             "OpenEnv REPL — Recursive Language Model playground"
         )
+    if "state_cls" in _sig.parameters:
+        create_app_kwargs["state_cls"] = REPLState
     app = create_app(
         create_repl_environment,
         REPLAction,
@@ -121,7 +123,7 @@ if "gradio_builder" in _sig.parameters:
     )
 else:
     _logger.warning(
-        "Installed openenv-core does not support gradio_builder; "
+        "Installed openenv does not support gradio_builder; "
         "custom REPL Gradio tab will not be available."
     )
     app = create_app(

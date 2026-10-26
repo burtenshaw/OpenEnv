@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
 """Sync environment documentation with the envs/ directory.
 
-Ensures every environment in envs/ has:
-  1. A doc stub in docs/source/environments/<slug>.md
-  2. A card in docs/source/environments.md
-  3. A toctree entry in docs/source/environments.md
+Ensures every environment in envs/ with a README.md has a corresponding
+doc stub in docs/source/environments/<slug>.md, and that existing stubs
+stay in sync with their source README.
 
-Also detects orphaned docs that reference envs which no longer exist.
+Also detects orphaned stubs that reference envs which no longer exist,
+and stubs that are not listed in docs/source/_toctree.yml (sidebar) or
+docs/source/environments.md (HTML catalog).
 
 Modes:
   --check   : Exit non-zero if out of sync (for CI)
-  --fix     : Auto-add missing entries and remove orphaned ones
+  --fix     : Auto-create missing stubs, refresh stale ones, delete orphans
   --dry-run : Preview what --fix would do without writing anything
+
+Note: entries in docs/source/environments.md (HTML catalog) and
+docs/source/_toctree.yml are managed manually. This script only
+writes the per-environment stub files; missing toctree/catalog
+entries are reported so they can be added by hand.
 """
 
 import argparse
 import os
 import re
 import sys
-import textwrap
+import tempfile
+from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENVS_DIR = os.path.join(ROOT, "envs")
 DOCS_ENVS_DIR = os.path.join(ROOT, "docs", "source", "environments")
-ENVIRONMENTS_MD = os.path.join(ROOT, "docs", "source", "environments.md")
+TOCTREE_PATH = os.path.join(ROOT, "docs", "source", "_toctree.yml")
+CATALOG_PATH = os.path.join(ROOT, "docs", "source", "environments.md")
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/huggingface/OpenEnv/main"
+GITHUB_BASE = "https://github.com/huggingface/OpenEnv"
 
-SKIP_ENTRIES = {"README.md"}
+SKIP_DIRS = {"README.md"}
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +49,17 @@ def get_env_dirs():
     return sorted(
         d
         for d in os.listdir(ENVS_DIR)
-        if os.path.isdir(os.path.join(ENVS_DIR, d)) and d not in SKIP_ENTRIES
+        if os.path.isdir(os.path.join(ENVS_DIR, d)) and d not in SKIP_DIRS
     )
 
 
 def get_existing_stub_mapping():
-    """Build slug → env_dir mapping by parsing {include} directives in stubs."""
+    """Build slug → env_dir mapping by reading stubs in docs/source/environments/.
+
+    Supports two formats:
+    - New: ``<!-- openenv-source: env_dir -->`` comment at top of file
+    - Legacy: ``{include} ../../../envs/<env_dir>/README.md`` directive
+    """
     mapping = {}
     for fname in os.listdir(DOCS_ENVS_DIR):
         if not fname.endswith(".md"):
@@ -52,105 +68,18 @@ def get_existing_stub_mapping():
         stub_path = os.path.join(DOCS_ENVS_DIR, fname)
         with open(stub_path) as f:
             content = f.read()
+        # New format: <!-- openenv-source: env_dir -->
+        match = re.search(r"<!--\s*openenv-source:\s*(\S+)\s*-->", content)
+        if match:
+            mapping[slug] = match.group(1)
+            continue
+        # Legacy format: {include}
         match = re.search(
             r"\{include\}\s+\.\./\.\./\.\./envs/([^/]+)/README\.md", content
         )
         if match:
             mapping[slug] = match.group(1)
     return mapping
-
-
-def get_toctree_slugs(content):
-    """Extract environment slugs from the toctree block."""
-    match = re.search(
-        r"```\{toctree\}[^\n]*\n(?:[^\n]*\n)*?\n(.*?)```",
-        content,
-        re.DOTALL,
-    )
-    if not match:
-        return []
-    return [
-        line.strip().replace("environments/", "")
-        for line in match.group(1).strip().splitlines()
-        if line.strip().startswith("environments/")
-    ]
-
-
-def get_card_slugs(content):
-    """Extract environment slugs from card button-links in environments.md."""
-    return re.findall(r"button-link\}\s*environments/([\w-]+)\.html", content)
-
-
-# ---------------------------------------------------------------------------
-# README parsing
-# ---------------------------------------------------------------------------
-
-
-def parse_frontmatter(env_dir):
-    """Return dict of YAML frontmatter from envs/<dir>/README.md, or {}."""
-    readme = os.path.join(ENVS_DIR, env_dir, "README.md")
-    if not os.path.exists(readme):
-        return {}
-    with open(readme) as f:
-        text = f.read()
-    if not text.startswith("---"):
-        return {}
-    try:
-        end = text.index("---", 3)
-        import yaml
-
-        return yaml.safe_load(text[3:end]) or {}
-    except (ValueError, Exception):
-        return {}
-
-
-def parse_description(env_dir):
-    """Extract the first paragraph after the H1 heading in README.md."""
-    readme = os.path.join(ENVS_DIR, env_dir, "README.md")
-    if not os.path.exists(readme):
-        return "TODO: Add description."
-    with open(readme) as f:
-        text = f.read()
-    if text.startswith("---"):
-        try:
-            end = text.index("---", 3)
-            text = text[end + 3 :].strip()
-        except ValueError:
-            pass
-    lines = text.splitlines()
-    found_h1 = False
-    desc_lines = []
-    for line in lines:
-        if line.startswith("# "):
-            found_h1 = True
-            continue
-        if found_h1:
-            stripped = line.strip()
-            if stripped == "":
-                if desc_lines:
-                    break
-                continue
-            desc_lines.append(stripped)
-    desc = " ".join(desc_lines) if desc_lines else "TODO: Add description."
-    desc = re.sub(r"\*\*([^*]+)\*\*", r"\1", desc)
-    desc = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", desc)
-    if len(desc) > 160:
-        desc = desc[:157] + "..."
-    return desc
-
-
-def derive_display_name(env_dir, frontmatter):
-    """Derive a human-readable display name for a card title."""
-    title = frontmatter.get("title", "")
-    if title:
-        name = re.sub(r"\s*(Environment\s*)?Server\s*$", "", title, flags=re.I).strip()
-        name = re.sub(
-            r"\s*Environment(\s+for\s+OpenEnv)?\s*$", "", name, flags=re.I
-        ).strip()
-        if name:
-            return name
-    slug = env_dir_to_slug(env_dir)
-    return slug.replace("_", " ").title()
 
 
 def env_dir_to_slug(env_dir):
@@ -162,145 +91,250 @@ def env_dir_to_slug(env_dir):
 
 
 # ---------------------------------------------------------------------------
-# Generators
+# README helpers
 # ---------------------------------------------------------------------------
+
+
+def _strip_frontmatter(text):
+    """Remove YAML frontmatter (--- ... ---) from the start of text."""
+    if text.startswith("---"):
+        try:
+            end = text.index("---", 3)
+            return text[end + 3 :].lstrip("\n")
+        except ValueError:
+            pass
+    return text
+
+
+def _rewrite_relative_links(text, env_dir):
+    """Keep README links working after moving their content into the docs site."""
+    root = Path(ROOT).resolve()
+    source_dir = Path(ENVS_DIR) / env_dir
+    pattern = re.compile(
+        r"(?P<code>`+).*?(?P=code)"
+        r"|(?P<image>!\[[^\]\n]*\]\()(?P<image_url>[^)\s]+)"
+        r"|(?P<link>\]\()(?P<link_url><[^>\n]+>|[^)\s]+)"
+        r"|(?P<attribute>(?:href|src)=[\"'])(?P<attribute_url>[^\"'\n]+)"
+    )
+
+    def is_nested_image_destination(match):
+        """Return whether a generic link match belongs to an unsupported image."""
+        prefix = match.string[: match.start()]
+        image_start = prefix.rfind("![")
+        if image_start < 0:
+            return False
+
+        depth = 1
+        escaped = False
+        for character in prefix[image_start + 2 :]:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == "[":
+                depth += 1
+            elif character == "]":
+                depth -= 1
+                if depth == 0:
+                    return False
+        return depth == 1
+
+    def rewrite(match):
+        if match.group("code"):
+            return match.group(0)
+        kind = next(k for k in ("image", "link", "attribute") if match.group(k))
+        if kind == "link" and is_nested_image_destination(match):
+            return match.group(0)
+        original = match.group(f"{kind}_url")
+        url = original.strip("<>")
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return match.group(0)
+        if parsed.scheme or parsed.netloc or not parsed.path or url.startswith("/"):
+            return match.group(0)
+        try:
+            target = (source_dir / unquote(parsed.path)).resolve()
+        except (OSError, ValueError):
+            return match.group(0)
+        try:
+            relative = target.relative_to(root)
+        except ValueError:
+            return match.group(0)
+        if not target.exists():
+            return match.group(0)
+        is_image = kind == "image" or match.group(kind).startswith("src=")
+        if is_image:
+            base = GITHUB_RAW_BASE
+        else:
+            base = f"{GITHUB_BASE}/{'tree' if target.is_dir() else 'blob'}/main"
+        destination = f"{base}/{quote(relative.as_posix())}"
+        destination = urlunsplit(
+            (*urlsplit(destination)[:3], parsed.query, parsed.fragment)
+        )
+        if original.startswith("<"):
+            destination = f"<{destination}>"
+        return match.group(kind) + destination
+
+    lines = []
+    fence = None
+    list_content_indents = []
+    for line in text.splitlines(keepends=True):
+        marker = re.match(
+            r"^(?:[ ]{0,3}>[ \t]?)*(?P<indent>[ \t]*)"
+            r"(?P<fence>`{3,}|~{3,})(?P<rest>.*)$",
+            line,
+        )
+        if marker:
+            fence_indent = len(marker.group("indent").expandtabs(4))
+            in_list = any(
+                content_indent <= fence_indent <= content_indent + 3
+                for content_indent in list_content_indents
+            )
+            if fence_indent > 3 and not in_list:
+                marker = None
+        if fence:
+            if (
+                marker
+                and marker.group("fence")[0] == fence[0]
+                and len(marker.group("fence")) >= len(fence)
+                and not marker.group("rest").strip()
+            ):
+                fence = None
+            lines.append(line)
+        elif marker:
+            fence = marker.group("fence")
+            lines.append(line)
+        else:
+            indentation = re.match(r"^[ \t]*", line)[0]
+            indent_width = len(indentation.expandtabs(4))
+            list_marker = re.match(
+                r"^(?P<indent>[ \t]*)(?:[-+*]|\d{1,9}[.)])(?P<spacing>[ \t]+)",
+                line,
+            )
+
+            if list_marker:
+                while list_content_indents and indent_width < list_content_indents[-1]:
+                    list_content_indents.pop()
+                content_indent = len(list_marker.group(0).expandtabs(4))
+                if (
+                    not list_content_indents
+                    or content_indent != list_content_indents[-1]
+                ):
+                    list_content_indents.append(content_indent)
+                lines.append(pattern.sub(rewrite, line))
+            elif not line.strip():
+                lines.append(line)
+            else:
+                while list_content_indents and indent_width < list_content_indents[-1]:
+                    list_content_indents.pop()
+                is_list_continuation = (
+                    bool(list_content_indents)
+                    and indent_width < list_content_indents[-1] + 4
+                )
+                if line.startswith(("    ", "\t")) and not is_list_continuation:
+                    lines.append(line)
+                else:
+                    if not indentation:
+                        list_content_indents.clear()
+                    lines.append(pattern.sub(rewrite, line))
+    return "".join(lines)
 
 
 def generate_stub(env_dir):
-    return f"```{{include}} ../../../envs/{env_dir}/README.md\n```\n"
+    """Return the doc stub content for an environment.
 
-
-def generate_card(display_name, slug, description):
-    return textwrap.dedent(
-        f"""\
-        ````{{grid-item-card}} {display_name}
-        :class-card: sd-border-1
-
-        {description}
-
-        +++
-        ```{{button-link}} environments/{slug}.html
-        :color: primary
-        :outline:
-
-        {{octicon}}`file;1em` Docs
-        ```
-        ````"""
-    )
-
-
-def generate_toctree_entry(slug):
-    return f"environments/{slug}"
+    Inlines the README content (without HF Spaces YAML frontmatter) and
+    prepends a ``<!-- openenv-source: env_dir -->`` comment so the script
+    can identify the source env when re-reading the file later.
+    """
+    readme_path = os.path.join(ENVS_DIR, env_dir, "README.md")
+    with open(readme_path) as f:
+        content = f.read()
+    content = _strip_frontmatter(content)
+    content = _rewrite_relative_links(content, env_dir)
+    return f"<!-- openenv-source: {env_dir} -->\n{content}"
 
 
 # ---------------------------------------------------------------------------
-# Insertion / removal helpers
+# Analysis
 # ---------------------------------------------------------------------------
 
 
-def insert_card(content, card_block):
-    """Insert a card block before the closing ````` of the first grid."""
-    marker = "\n`````\n\n```{tip}"
-    if marker not in content:
-        marker = "\n`````\n"
-    if marker not in content:
-        raise RuntimeError(
-            "Could not find grid closing marker in environments.md. "
-            "The file structure may have changed — add the card manually."
-        )
-    return content.replace(marker, f"\n{card_block}\n{marker}", 1)
-
-
-def insert_toctree_entry(content, entry):
-    """Append a toctree entry at the end of the toctree block."""
-    match = re.search(
-        r"(```\{toctree\}[^\n]*\n(?:[^\n]*\n)*?\n)(.*?)(```)",
-        content,
-        re.DOTALL,
-    )
-    if not match:
-        raise RuntimeError(
-            "Could not find toctree block in environments.md. "
-            "The file structure may have changed — add the entry manually."
-        )
-    before = content[: match.end(2)]
-    after = content[match.end(2) :]
-    return before + entry + "\n" + after
-
-
-def remove_card(content, slug):
-    """Remove a card block matching the given slug."""
-    pattern = re.compile(
-        rf"````\{{grid-item-card\}}[^\n]*\n"
-        rf"(?:(?!````\{{grid-item-card\}}).)*?"
-        rf"```\{{button-link\}}\s*environments/{re.escape(slug)}\.html.*?"
-        rf"````\n?",
-        re.DOTALL,
-    )
-    return pattern.sub("", content)
-
-
-def remove_toctree_entry(content, slug):
-    """Remove a toctree entry for the given slug."""
-    return re.sub(rf"\n\s*environments/{re.escape(slug)}\s*(?=\n)", "", content)
-
-
-# ---------------------------------------------------------------------------
-# Main logic
-# ---------------------------------------------------------------------------
-
-
-def analyze(env_dirs, stub_mapping, content):
-    """Return (missing, orphaned, no_readme) lists."""
-    toctree_slugs = set(get_toctree_slugs(content))
-    card_slugs = set(get_card_slugs(content))
-    stub_slugs = set(stub_mapping.keys())
-
+def analyze(env_dirs, stub_mapping):
+    """Return (missing, orphaned, stale, no_readme) lists."""
     reverse_map = {v: k for k, v in stub_mapping.items()}
-
     documented_env_dirs = set(stub_mapping.values())
 
     missing = []
+    stale = []
     no_readme = []
+
     for env_dir in env_dirs:
         readme = os.path.join(ENVS_DIR, env_dir, "README.md")
         if not os.path.exists(readme):
             no_readme.append(env_dir)
             continue
+
         if env_dir in documented_env_dirs:
             slug = reverse_map[env_dir]
+            # Check if existing stub is stale (content drifted from README)
+            stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
+            if os.path.exists(stub_path):
+                expected = generate_stub(env_dir)
+                with open(stub_path) as f:
+                    actual = f.read()
+                if actual != expected:
+                    stale.append((env_dir, slug))
         else:
             slug = env_dir_to_slug(env_dir)
-
-        issues = []
-        if slug not in stub_slugs:
-            issues.append("stub")
-        if slug not in card_slugs:
-            issues.append("card")
-        if slug not in toctree_slugs:
-            issues.append("toctree")
-        if issues:
-            missing.append((env_dir, slug, issues))
+            missing.append((env_dir, slug))
 
     orphaned = []
     env_dir_set = set(env_dirs)
     for slug, env_dir in stub_mapping.items():
         if env_dir not in env_dir_set:
-            issues = []
-            if slug in stub_slugs:
-                issues.append("stub")
-            if slug in card_slugs:
-                issues.append("card")
-            if slug in toctree_slugs:
-                issues.append("toctree")
-            if issues:
-                orphaned.append((env_dir, slug, issues))
+            orphaned.append((env_dir, slug))
 
-    return missing, orphaned, no_readme
+    return missing, orphaned, stale, no_readme
 
 
-def run_check(missing, orphaned, no_readme):
-    """Print report and return exit code."""
+def find_unlisted(stub_mapping, orphaned):
+    """Return (unlisted_toctree, unlisted_catalog) slug lists.
+
+    A stub is unlisted when docs/source/_toctree.yml has no
+    ``- local: environments/<slug>`` entry (the page is unreachable from the
+    sidebar) or docs/source/environments.md has no ``environments/<slug>``
+    link (the env has no card in the catalog). Both files are managed
+    manually, so these are reported rather than auto-fixed. Orphaned stubs
+    are skipped: the fix there is deleting the stub, not listing it.
+    """
+    with open(TOCTREE_PATH) as f:
+        toctree = f.read()
+    with open(CATALOG_PATH) as f:
+        catalog = f.read()
+
+    orphaned_slugs = {slug for _, slug in orphaned}
+    unlisted_toctree = []
+    unlisted_catalog = []
+    for slug in sorted(stub_mapping):
+        if slug in orphaned_slugs:
+            continue
+        if not re.search(
+            rf"^\s*-\s*local:\s*environments/{re.escape(slug)}\s*$", toctree, re.M
+        ):
+            unlisted_toctree.append(slug)
+        if not re.search(rf"environments/{re.escape(slug)}\b", catalog):
+            unlisted_catalog.append(slug)
+    return unlisted_toctree, unlisted_catalog
+
+
+# ---------------------------------------------------------------------------
+# Reporting and fixing
+# ---------------------------------------------------------------------------
+
+
+def run_check(missing, orphaned, stale, no_readme, unlisted_toctree, unlisted_catalog):
     ok = True
 
     if no_readme:
@@ -310,110 +344,105 @@ def run_check(missing, orphaned, no_readme):
         for env_dir in no_readme:
             print(f"  envs/{env_dir}/")
         print()
-        print("  Add a README.md to include them in the documentation.")
         print("  This is a warning only — it will not block your PR.\n")
 
     if missing:
         ok = False
-        print("❌ Missing documentation for the following environments:\n")
-        for env_dir, slug, issues in missing:
-            print(f"  envs/{env_dir}/  →  slug '{slug}'  missing: {', '.join(issues)}")
+        print("❌ Missing stubs for the following environments:\n")
+        for env_dir, slug in missing:
+            print(f"  envs/{env_dir}/  →  docs/source/environments/{slug}.md")
         print()
-        print("  Every environment in envs/ with a README.md must have:")
-        print("    1. A doc stub at docs/source/environments/<slug>.md")
-        print("    2. A card in the grid in docs/source/environments.md")
-        print("    3. A toctree entry in docs/source/environments.md")
+        print("  Run:  python scripts/sync_env_docs.py --fix\n")
+
+    if stale:
+        ok = False
+        print("⚠️  The following stubs are out of date with their source README:\n")
+        for env_dir, slug in stale:
+            print(f"  docs/source/environments/{slug}.md  ←  envs/{env_dir}/README.md")
         print()
-        print("  To fix automatically, run:")
-        print("    python scripts/sync_env_docs.py --fix")
-        print()
-        print("  Or to preview what would change first:")
-        print("    python scripts/sync_env_docs.py --dry-run")
-        print()
-        print(
-            "  See docs/README.md § 'Adding an Environment to the Docs' for manual steps."
-        )
-        print()
+        print("  Run:  python scripts/sync_env_docs.py --fix\n")
 
     if orphaned:
         ok = False
-        print("⚠️  Orphaned documentation (env directory no longer exists):\n")
-        for env_dir, slug, issues in orphaned:
-            print(f"  slug '{slug}'  →  envs/{env_dir}/  orphaned: {', '.join(issues)}")
+        print("⚠️  Orphaned stubs (env directory no longer exists):\n")
+        for env_dir, slug in orphaned:
+            print(f"  docs/source/environments/{slug}.md  (was envs/{env_dir}/)")
         print()
-        print("  These doc entries reference environments that have been removed.")
-        print("  To clean up automatically, run:")
-        print("    python scripts/sync_env_docs.py --fix")
+        print("  Run:  python scripts/sync_env_docs.py --fix\n")
+
+    if unlisted_toctree:
+        ok = False
+        print("❌ Stubs missing from the docs sidebar (docs/source/_toctree.yml):\n")
+        for slug in unlisted_toctree:
+            print(f"  docs/source/environments/{slug}.md")
         print()
+        print(
+            "  Add an entry to the Environments section of docs/source/_toctree.yml:\n"
+            "    - local: environments/<slug>\n"
+            "      title: <Env Name>\n"
+        )
+
+    if unlisted_catalog:
+        ok = False
+        print("❌ Stubs missing from the HTML catalog (docs/source/environments.md):\n")
+        for slug in unlisted_catalog:
+            print(f"  docs/source/environments/{slug}.md")
+        print()
+        print(
+            "  Add a card to docs/source/environments.md (copy an existing\n"
+            '  <div class="border ..."> card and link to environments/<slug>).\n'
+        )
 
     if ok:
-        print("✅ All environments are documented and no orphans found.")
+        print("✅ All environment stubs are present and up to date.")
     return 0 if ok else 1
 
 
-def run_fix(missing, orphaned, content, dry_run=False):
-    """Apply fixes. Returns (new_content, files_created, files_deleted)."""
-    files_created = []
-    files_deleted = []
-    new_content = content
+def run_fix(missing, orphaned, stale, dry_run=False):
+    def label(action):
+        return f"[dry-run] Would {action}" if dry_run else action
 
-    for env_dir, slug, issues in missing:
-        fm = parse_frontmatter(env_dir)
-        display_name = derive_display_name(env_dir, fm)
-        description = parse_description(env_dir)
+    def write_stub(stub_path, env_dir):
+        content = generate_stub(env_dir)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                dir=os.path.dirname(stub_path),
+                prefix=f".{os.path.basename(stub_path)}.",
+                delete=False,
+            ) as temporary:
+                temporary_path = temporary.name
+                temporary.write(content)
+            os.replace(temporary_path, stub_path)
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
-        if "stub" in issues:
-            stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
-            stub_content = generate_stub(env_dir)
+    for env_dir, slug in missing:
+        stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
+        if dry_run:
+            print(f"  {label('create')} {os.path.relpath(stub_path, ROOT)}")
+        else:
+            write_stub(stub_path, env_dir)
+            print(f"  ✅ Created {os.path.relpath(stub_path, ROOT)}")
+
+    for env_dir, slug in stale:
+        stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
+        if dry_run:
+            print(f"  {label('refresh')} {os.path.relpath(stub_path, ROOT)}")
+        else:
+            write_stub(stub_path, env_dir)
+            print(f"  🔄 Refreshed {os.path.relpath(stub_path, ROOT)}")
+
+    for env_dir, slug in orphaned:
+        stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
+        if os.path.exists(stub_path):
             if dry_run:
-                print(f"  [dry-run] Would create {os.path.relpath(stub_path, ROOT)}")
+                print(f"  {label('delete')} {os.path.relpath(stub_path, ROOT)}")
             else:
-                with open(stub_path, "w") as f:
-                    f.write(stub_content)
-                print(f"  ✅ Created {os.path.relpath(stub_path, ROOT)}")
-            files_created.append(stub_path)
-
-        if "card" in issues:
-            card_block = generate_card(display_name, slug, description)
-            new_content = insert_card(new_content, card_block)
-            action = "[dry-run] Would add" if dry_run else "✅ Added"
-            print(f"  {action} card for '{display_name}' (slug: {slug})")
-
-        if "toctree" in issues:
-            entry = generate_toctree_entry(slug)
-            new_content = insert_toctree_entry(new_content, entry)
-            action = "[dry-run] Would add" if dry_run else "✅ Added"
-            print(f"  {action} toctree entry for '{slug}'")
-
-    for env_dir, slug, issues in orphaned:
-        if "stub" in issues:
-            stub_path = os.path.join(DOCS_ENVS_DIR, f"{slug}.md")
-            if os.path.exists(stub_path):
-                if dry_run:
-                    print(
-                        f"  [dry-run] Would delete {os.path.relpath(stub_path, ROOT)}"
-                    )
-                else:
-                    os.remove(stub_path)
-                    print(f"  🗑️  Deleted {os.path.relpath(stub_path, ROOT)}")
-                files_deleted.append(stub_path)
-
-        if "card" in issues:
-            new_content = remove_card(new_content, slug)
-            action = "[dry-run] Would remove" if dry_run else "🗑️  Removed"
-            print(f"  {action} card for slug '{slug}'")
-
-        if "toctree" in issues:
-            new_content = remove_toctree_entry(new_content, slug)
-            action = "[dry-run] Would remove" if dry_run else "🗑️  Removed"
-            print(f"  {action} toctree entry for '{slug}'")
-
-    if not dry_run and new_content != content:
-        with open(ENVIRONMENTS_MD, "w") as f:
-            f.write(new_content)
-        print(f"\n  ✅ Updated {os.path.relpath(ENVIRONMENTS_MD, ROOT)}")
-
-    return new_content, files_created, files_deleted
+                os.remove(stub_path)
+                print(f"  🗑️  Deleted {os.path.relpath(stub_path, ROOT)}")
 
 
 def main():
@@ -425,7 +454,7 @@ def main():
         "--check", action="store_true", help="Check sync status (CI mode)"
     )
     group.add_argument(
-        "--fix", action="store_true", help="Auto-fix missing and orphaned docs"
+        "--fix", action="store_true", help="Fix missing, stale, and orphaned stubs"
     )
     group.add_argument(
         "--dry-run", action="store_true", help="Preview --fix without writing"
@@ -434,44 +463,47 @@ def main():
 
     env_dirs = get_env_dirs()
     stub_mapping = get_existing_stub_mapping()
-
-    with open(ENVIRONMENTS_MD) as f:
-        content = f.read()
-
-    missing, orphaned, no_readme = analyze(env_dirs, stub_mapping, content)
+    missing, orphaned, stale, no_readme = analyze(env_dirs, stub_mapping)
+    unlisted_toctree, unlisted_catalog = find_unlisted(stub_mapping, orphaned)
 
     if args.check:
-        sys.exit(run_check(missing, orphaned, no_readme))
-    elif args.fix:
-        if no_readme:
-            print(
-                "⚠️  The following environments have no README.md and will not appear on the docs site:\n"
+        sys.exit(
+            run_check(
+                missing, orphaned, stale, no_readme, unlisted_toctree, unlisted_catalog
             )
-            for env_dir in no_readme:
-                print(f"  envs/{env_dir}/")
-            print()
-            print("  Add a README.md to include them in the documentation.")
-            print()
-        if not missing and not orphaned:
-            print("✅ Everything is already in sync.")
-            return
-        print("Fixing documentation...\n")
-        run_fix(missing, orphaned, content, dry_run=False)
-    elif args.dry_run:
-        if no_readme:
-            print(
-                "⚠️  The following environments have no README.md and will not appear on the docs site:\n"
-            )
-            for env_dir in no_readme:
-                print(f"  envs/{env_dir}/")
-            print()
-            print("  Add a README.md to include them in the documentation.")
-            print()
-        if not missing and not orphaned:
-            print("✅ Everything is already in sync. Nothing to do.")
-            return
-        print("Dry run — no files will be modified:\n")
-        run_fix(missing, orphaned, content, dry_run=True)
+        )
+
+    # --fix and --dry-run
+    if no_readme:
+        print("⚠️  Environments without README.md (skipped):\n")
+        for env_dir in no_readme:
+            print(f"  envs/{env_dir}/")
+        print()
+
+    if not missing and not orphaned and not stale:
+        print("✅ All stubs are already in sync.")
+    else:
+        print(
+            "Fixing documentation...\n"
+            if not args.dry_run
+            else "Dry run — no files will be modified:\n"
+        )
+        run_fix(missing, orphaned, stale, dry_run=args.dry_run)
+
+    # Toctree/catalog entries are managed manually; remind about gaps that
+    # --fix cannot write (including stubs it just created).
+    manual_toctree = sorted(set(unlisted_toctree) | {slug for _, slug in missing})
+    manual_catalog = sorted(set(unlisted_catalog) | {slug for _, slug in missing})
+    if manual_toctree:
+        print(
+            "\n⚠️  Add these to docs/source/_toctree.yml manually (- local: environments/<slug>):"
+        )
+        for slug in manual_toctree:
+            print(f"  {slug}")
+    if manual_catalog:
+        print("\n⚠️  Add a card for these to docs/source/environments.md manually:")
+        for slug in manual_catalog:
+            print(f"  {slug}")
 
 
 if __name__ == "__main__":

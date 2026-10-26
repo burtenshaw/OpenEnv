@@ -1,23 +1,25 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """LLM client abstraction for calling LLM endpoints.
 
 Provides a generic RPC abstraction: point it at an endpoint/port, tell it the
 protocol, and it works. OpenAI-compatible API is the first implementation,
 covering OpenAI, vLLM, TGI, Ollama, HuggingFace Inference API, etc.
-Anthropic's native API is supported via ``AnthropicClient``.
+Anthropic's native API is supported via `AnthropicClient`.
 
-Usage:
+Examples:
+
+    ```python
     client = OpenAIClient("http://localhost", 8000, model="meta-llama/...")
     response = await client.complete("What is 2+2?")
+
+    # The endpoint may carry its own port and path prefix:
+    client = OpenAIClient("http://localhost:8000/v1", port=None, model="meta-llama/...")
 
     # Or use the factory for hosted APIs:
     client = create_llm_client("openai", model="gpt-4", api_key="sk-...")
     response = await client.complete_with_tools(messages, tools)
+    ```
 """
 
 from __future__ import annotations
@@ -26,8 +28,78 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
+
+_OPENAI_API_PREFIX = "/v1"
+_MIN_PORT, _MAX_PORT = 1, 65535
+
+
+def _redact_userinfo(endpoint: str) -> str:
+    """Drop `user:password@` from a URL so it is safe to echo in an error."""
+    scheme, sep, rest = endpoint.partition("://")
+    authority, slash, tail = rest.partition("/")
+    if not sep or "@" not in authority:
+        return endpoint
+    return f"{scheme}{sep}***@{authority.rsplit('@', 1)[-1]}{slash}{tail}"
+
+
+def _join_endpoint_port(endpoint: str, port: int | None) -> str:
+    """Validate an endpoint URL and combine it with an optional port.
+
+    Only `http`/`https` URLs with a host are accepted. Credentials, query
+    strings and fragments are rejected: the endpoint is logged and persisted in
+    rollout metadata, and the SDKs build request URLs by appending to the path,
+    which corrupts a query string. `port` is appended only when the URL does
+    not name one; an explicit port that differs from the one in the URL is
+    rejected rather than silently overridden. A trailing slash on the path is
+    dropped. Invalid endpoints raise `ValueError`.
+    """
+    safe = _redact_userinfo(endpoint)
+    try:
+        parts = urlsplit(endpoint)
+        if parts.scheme not in ("http", "https"):
+            raise ValueError("expected an http:// or https:// URL")
+        if not parts.hostname:
+            raise ValueError("missing host")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("credentials in the URL are not supported, use api_key")
+        if parts.query or parts.fragment:
+            raise ValueError("query strings and fragments are not supported")
+        if parts.netloc.endswith(":"):
+            raise ValueError("empty port")
+        url_port = parts.port
+        for candidate in (url_port, port):
+            if candidate is not None and not _MIN_PORT <= candidate <= _MAX_PORT:
+                raise ValueError(
+                    f"port {candidate} is out of range {_MIN_PORT}-{_MAX_PORT}"
+                )
+    except ValueError as exc:
+        raise ValueError(f"Invalid endpoint URL {safe!r}: {exc}") from exc
+
+    if url_port is None:
+        if port is not None:
+            parts = parts._replace(netloc=f"{parts.netloc}:{port}")
+    elif port is not None and port != url_port:
+        raise ValueError(
+            f"Endpoint URL {safe!r} already specifies port {url_port}, "
+            f"which conflicts with port={port}"
+        )
+    return urlunsplit(parts._replace(path=parts.path.rstrip("/")))
+
+
+def _openai_base_url(base_url: str) -> str:
+    """Append the OpenAI `/v1` prefix when `base_url` has no path.
+
+    A URL that already names a path (`/v1`, or a gateway prefix such as
+    `/openai/v1`) is used as-is, matching the OpenAI SDK convention that
+    `base_url` includes the API prefix.
+    """
+    parts = urlsplit(base_url)
+    if parts.path in ("", "/"):
+        return urlunsplit(parts._replace(path=_OPENAI_API_PREFIX))
+    return base_url
 
 
 @dataclass
@@ -67,14 +139,19 @@ class LLMResponse:
 class LLMClient(ABC):
     """Abstract base for LLM endpoint clients.
 
-    Subclass and implement ``complete()`` for your protocol.
+    Subclass and implement `complete()` for your protocol.
 
     Args:
-        endpoint: The base URL of the LLM service (e.g. "http://localhost").
-        port: The port the service listens on.
+        endpoint (`str`):
+            The `http(s)` base URL of the LLM service (e.g. "http://localhost").
+            May include a port and a path (e.g. "http://localhost:8000/v1").
+            Credentials, query strings and fragments are rejected.
+        port (`int` or `None`):
+            The port the service listens on. Appended to `endpoint` when the
+            URL does not name one; must match the URL's port when both are given.
     """
 
-    def __init__(self, endpoint: str, port: int):
+    def __init__(self, endpoint: str, port: int | None):
         self.endpoint = endpoint
         self.port = port
 
@@ -83,8 +160,10 @@ class LLMClient(ABC):
         """Send a prompt, return the text response.
 
         Args:
-            prompt: The user prompt to send.
-            **kwargs: Override default parameters (temperature, max_tokens, etc.).
+            prompt (`str`):
+                The user prompt to send.
+            **kwargs:
+                Override default parameters (temperature, max_tokens, etc.).
 
         Returns:
             The model's text response.
@@ -99,16 +178,19 @@ class LLMClient(ABC):
     ) -> LLMResponse:
         """Send messages with tool definitions, return a normalized response.
 
-        Messages use OpenAI-format dicts (``{"role": "...", "content": "..."}``).
+        Messages use OpenAI-format dicts (`{"role": "...", "content": "..."}`).
         Tools use MCP tool definitions; they are converted internally.
 
         Args:
-            messages: Conversation history as OpenAI-format message dicts.
-            tools: MCP tool definitions.
-            **kwargs: Override default parameters (temperature, max_tokens, etc.).
+            messages (`list[dict[str, Any]]`):
+                Conversation history as OpenAI-format message dicts.
+            tools (`list[dict[str, Any]]`):
+                MCP tool definitions.
+            **kwargs:
+                Override default parameters (temperature, max_tokens, etc.).
 
         Returns:
-            An ``LLMResponse`` with the model's text and any tool calls.
+            An [`LLMResponse`] with the model's text and any tool calls.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support tool calling"
@@ -116,8 +198,8 @@ class LLMClient(ABC):
 
     @property
     def base_url(self) -> str:
-        """Construct base URL from endpoint and port."""
-        return f"{self.endpoint}:{self.port}"
+        """Base URL of the service: `endpoint` plus `port` when the URL names none."""
+        return _join_endpoint_port(self.endpoint, self.port)
 
 
 class OpenAIClient(LLMClient):
@@ -127,22 +209,32 @@ class OpenAIClient(LLMClient):
     or any endpoint that speaks the OpenAI chat completions format.
 
     Args:
-        endpoint: The base URL (e.g. "http://localhost").
-        port: The port number.
-        model: Model name to pass to the API.
-        api_key: API key. Defaults to "not-needed" for local endpoints.
-        system_prompt: Optional system message prepended to every request.
-        temperature: Default sampling temperature.
-        max_tokens: Default max tokens in the response.
-        use_max_completion_tokens: Use max_completion_tokens instead of
-            max_tokens. Required for newer OpenAI models (gpt-5-mini, o1, o3).
-            Not supported by self-hosted OpenAI-compatible endpoints.
+        endpoint (`str`):
+            The base URL (e.g. "http://localhost"). May include a port and a
+            path (e.g. "http://localhost:8000/v1"). The `/v1` API prefix is
+            appended when the URL has no path; a URL with a path is used as-is.
+        port (`int` or `None`):
+            The port number, appended when `endpoint` does not name one; must
+            match the URL's port when both are given.
+        model (`str`):
+            Model name to pass to the API.
+        api_key (`str`, *optional*):
+            API key. Defaults to "not-needed" for local endpoints.
+        system_prompt (`str`, *optional*):
+            System message prepended to every request.
+        temperature (`float`, *optional*, defaults to `0.0`):
+            Default sampling temperature.
+        max_tokens (`int`, *optional*, defaults to `256`):
+            Default max tokens in the response.
+        use_max_completion_tokens (`bool`, *optional*, defaults to `False`):
+            Use max_completion_tokens instead of max_tokens. Required for newer OpenAI models
+            (gpt-5-mini, o1, o3). Not supported by self-hosted OpenAI-compatible endpoints.
     """
 
     def __init__(
         self,
         endpoint: str,
-        port: int,
+        port: int | None,
         model: str,
         api_key: str | None = None,
         system_prompt: str | None = None,
@@ -161,16 +253,30 @@ class OpenAIClient(LLMClient):
         self._omit_temperature = use_max_completion_tokens
 
         self._client = AsyncOpenAI(
-            base_url=f"{self.base_url}/v1",
+            base_url=_openai_base_url(self.base_url),
             api_key=api_key if api_key is not None else "not-needed",
         )
+
+    def _chat_completion_kwargs(
+        self, messages: list[dict[str, Any]], **kwargs: Any
+    ) -> dict[str, Any]:
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            self._tokens_param: kwargs.get("max_tokens", self.max_tokens),
+        }
+        if not self._omit_temperature:
+            create_kwargs["temperature"] = kwargs.get("temperature", self.temperature)
+        return create_kwargs
 
     async def complete(self, prompt: str, **kwargs) -> str:
         """Send a chat completion request.
 
         Args:
-            prompt: The user message.
-            **kwargs: Overrides for temperature, max_tokens.
+            prompt (`str`):
+                The user message.
+            **kwargs:
+                Overrides for temperature, max_tokens.
 
         Returns:
             The assistant's response text.
@@ -180,13 +286,7 @@ class OpenAIClient(LLMClient):
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        call_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            self._tokens_param: kwargs.get("max_tokens", self.max_tokens),
-        }
-        if not self._omit_temperature:
-            call_kwargs["temperature"] = kwargs.get("temperature", self.temperature)
+        call_kwargs = self._chat_completion_kwargs(messages, **kwargs)
         response = await self._client.chat.completions.create(**call_kwargs)
         return response.choices[0].message.content or ""
 
@@ -196,13 +296,7 @@ class OpenAIClient(LLMClient):
         tools: list[dict[str, Any]],
         **kwargs: Any,
     ) -> LLMResponse:
-        create_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            self._tokens_param: kwargs.get("max_tokens", self.max_tokens),
-        }
-        if not self._omit_temperature:
-            create_kwargs["temperature"] = kwargs.get("temperature", self.temperature)
+        create_kwargs = self._chat_completion_kwargs(messages, **kwargs)
         openai_tools = _mcp_tools_to_openai(tools)
         if openai_tools:
             create_kwargs["tools"] = openai_tools
@@ -227,22 +321,30 @@ class OpenAIClient(LLMClient):
 class AnthropicClient(LLMClient):
     """Client for Anthropic's Messages API.
 
-    Requires the ``anthropic`` package (lazy-imported at construction time).
+    Requires the `anthropic` package (lazy-imported at construction time).
 
     Args:
-        endpoint: The base URL (e.g. "https://api.anthropic.com").
-        port: The port number.
-        model: Model name (e.g. "claude-sonnet-4-20250514").
-        api_key: Anthropic API key.
-        system_prompt: Optional system message prepended to every request.
-        temperature: Default sampling temperature.
-        max_tokens: Default max tokens in the response.
+        endpoint (`str`):
+            The base URL (e.g. `https://api.anthropic.com`). May include a port.
+        port (`int` or `None`):
+            The port number, appended when `endpoint` does not name one; must
+            match the URL's port when both are given.
+        model (`str`):
+            Model name (e.g. "claude-sonnet-4-20250514").
+        api_key (`str`, *optional*):
+            Anthropic API key.
+        system_prompt (`str`, *optional*):
+            System message prepended to every request.
+        temperature (`float`, *optional*, defaults to `0.0`):
+            Default sampling temperature.
+        max_tokens (`int`, *optional*, defaults to `256`):
+            Default max tokens in the response.
     """
 
     def __init__(
         self,
         endpoint: str,
-        port: int,
+        port: int | None,
         model: str,
         api_key: str | None = None,
         system_prompt: str | None = None,
@@ -346,15 +448,21 @@ def create_llm_client(
     """Create an LLM client for a hosted provider.
 
     Args:
-        provider: Provider name ("openai" or "anthropic").
-        model: Model identifier.
-        api_key: API key for the provider.
-        system_prompt: Optional system message prepended to every request.
-        temperature: Sampling temperature.
-        max_tokens: Maximum tokens in the response.
+        provider (`str`):
+            Provider name ("openai" or "anthropic").
+        model (`str`):
+            Model identifier.
+        api_key (`str`):
+            API key for the provider.
+        system_prompt (`str`, *optional*):
+            System message prepended to every request.
+        temperature (`float`, *optional*, defaults to `0.0`):
+            Sampling temperature.
+        max_tokens (`int`, *optional*, defaults to `4096`):
+            Maximum tokens in the response.
 
     Returns:
-        A configured ``LLMClient`` instance.
+        A configured [`LLMClient`] instance.
     """
     key = provider.lower()
     if key not in _HOSTED_PROVIDERS:
@@ -386,7 +494,7 @@ def create_llm_client(
 
 
 def _clean_mcp_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """Normalize an MCP tool ``inputSchema`` for LLM function-calling APIs."""
+    """Normalize an MCP tool `inputSchema` for LLM function-calling APIs."""
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}, "required": []}
 
@@ -471,9 +579,9 @@ def _openai_msgs_to_anthropic(
 ) -> tuple[str, list[dict[str, Any]]]:
     """Convert OpenAI-format messages to Anthropic format.
 
-    Returns ``(system_text, anthropic_messages)``.  System-role messages are
+    Returns `(system_text, anthropic_messages)`. System-role messages are
     extracted and concatenated; tool-result messages are converted to
-    Anthropic's ``tool_result`` content blocks inside user turns.
+    Anthropic's `tool_result` content blocks inside user turns.
     """
     system_parts: list[str] = []
     anthropic_msgs: list[dict[str, Any]] = []

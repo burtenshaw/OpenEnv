@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """Tests for custom Gradio layout options."""
 
@@ -115,11 +111,10 @@ def test_single_view_custom_builder_uses_title_override(monkeypatch) -> None:
 def test_custom_tab_primary_controls_tab_order_and_title(monkeypatch) -> None:
     captured = _capture_mounted_blocks(monkeypatch)
 
-    def fake_tabbed_interface(blocks, tab_names, title):
+    def fake_tabbed_interface(blocks, tab_names):
         captured["tab_blocks"] = blocks
         captured["tab_names"] = tab_names
-        captured["tab_title"] = title
-        return gr.Blocks(title=title)
+        return gr.Blocks()
 
     monkeypatch.setattr(web_interface.gr, "TabbedInterface", fake_tabbed_interface)
 
@@ -138,7 +133,34 @@ def test_custom_tab_primary_controls_tab_order_and_title(monkeypatch) -> None:
     )
 
     assert captured["tab_names"] == ["REPL", "Playground"]
-    assert captured["tab_title"] == "Tabbed Layout"
+    assert len(captured["tab_blocks"]) == 2
+    assert captured["blocks"].title == "Tabbed Layout"
+
+
+def test_custom_builder_defaults_to_playground_first(monkeypatch) -> None:
+    captured = _capture_mounted_blocks(monkeypatch)
+
+    def fake_tabbed_interface(blocks, tab_names):
+        captured["tab_blocks"] = blocks
+        captured["tab_names"] = tab_names
+        return gr.Blocks()
+
+    monkeypatch.setattr(web_interface.gr, "TabbedInterface", fake_tabbed_interface)
+
+    def builder(web_manager, action_fields, metadata, is_chat_env, title, quick_start):
+        return gr.Blocks(title=title)
+
+    create_web_interface_app(
+        LayoutEnvironment,
+        LayoutAction,
+        LayoutObservation,
+        env_name="layout_env",
+        gradio_builder=builder,
+        custom_tab_name="Custom View",
+        title_override="Tabbed Layout",
+    )
+
+    assert captured["tab_names"] == ["Playground", "Custom View"]
     assert len(captured["tab_blocks"]) == 2
     assert captured["blocks"].title == "Tabbed Layout"
 

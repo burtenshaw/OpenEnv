@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """__ENV_TITLE_NAME__ Environment Client."""
 
@@ -26,8 +22,8 @@ class __ENV_CLASS_NAME__Env(
     Each client instance has its own dedicated environment session on the server.
 
     Example:
-        >>> # Connect to a running server
-        >>> with __ENV_CLASS_NAME__Env(base_url="http://localhost:8000") as client:
+        >>> # Connect to a running server (.sync() for sync use)
+        >>> with __ENV_CLASS_NAME__Env(base_url="http://localhost:8000").sync() as client:
         ...     result = client.reset()
         ...     print(result.observation.echoed_message)
         ...
@@ -35,8 +31,8 @@ class __ENV_CLASS_NAME__Env(
         ...     print(result.observation.echoed_message)
 
     Example with Docker:
-        >>> # Automatically start container and connect
-        >>> client = __ENV_CLASS_NAME__Env.from_docker_image("__ENV_NAME__-env:latest")
+        >>> # Automatically start container and connect (.sync() for sync use)
+        >>> client = __ENV_CLASS_NAME__Env.from_docker_image("__ENV_IMAGE_NAME__:latest").sync()
         >>> try:
         ...     result = client.reset()
         ...     result = client.step(__ENV_CLASS_NAME__Action(message="Test"))
@@ -74,13 +70,14 @@ class __ENV_CLASS_NAME__Env(
             message_length=obs_data.get("message_length", 0),
             done=payload.get("done", False),
             reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
+            metadata=payload.get("metadata", obs_data.get("metadata", {})),
         )
 
         return StepResult(
             observation=observation,
             reward=payload.get("reward"),
             done=payload.get("done", False),
+            metadata=payload.get("metadata"),
         )
 
     def _parse_state(self, payload: Dict) -> State:

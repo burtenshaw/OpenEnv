@@ -1,6 +1,6 @@
-# Collecting rollouts with OpenEnv for supervised training
+# Collect Rollouts for SFT
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/meta-pytorch/OpenEnv/blob/main/examples/sft_warmup.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/OpenEnv/blob/main/examples/sft_warmup.ipynb)
 
 OpenEnv environments are not only useful for RL training — they are also a natural tool for **collecting
 rollouts that become supervised training data**. The environment handles episode management, automatic scoring,
@@ -36,9 +36,9 @@ bookkeeping. An OpenEnv environment gives you all three out of the box:
 |---|---|
 | **Student model** | [`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B) |
 | **Teacher model** | `gpt-5-mini` via the OpenAI API |
-| **Environment** | [`reasoning_gym_env`](https://github.com/meta-pytorch/OpenEnv/tree/main/envs/reasoning_gym_env) / `chain_sum` |
+| **Environment** | [`reasoning_gym_env`](https://github.com/huggingface/OpenEnv/tree/main/envs/reasoning_gym_env) / `chain_sum` |
 | **SFT trainer** | [TRL `SFTTrainer`](https://huggingface.co/docs/trl/main/en/sft_trainer) |
-| **Next step** | [End-to-end walkthrough with GRPO](https://meta-pytorch.org/OpenEnv/tutorials/end-to-end-walkthrough.html) |
+| **Next step** | [End-to-end walkthrough with GRPO](end-to-end-walkthrough) |
 
 ---
 
@@ -46,7 +46,7 @@ bookkeeping. An OpenEnv environment gives you all three out of the box:
 
 ```python
 !pip install -q openai trl
-!pip install -q openenv-core
+!pip install -q openenv
 !pip install -q --no-deps git+https://huggingface.co/spaces/sergiopaniego/reasoning_gym
 !pip install -Uq "transformers>=5.3.0"
 ```
@@ -80,7 +80,7 @@ assert YOUR_HF_USERNAME != "your-username", "Replace YOUR_HF_USERNAME with your 
 
 ## 3. Define the system prompt
 
-Use the same prompt as the [GRPO tutorial](https://meta-pytorch.org/OpenEnv/tutorials/end-to-end-walkthrough.html)
+Use the same prompt as the [GRPO tutorial](end-to-end-walkthrough)
 so the SFT-trained model is a drop-in replacement when you continue with GRPO.
 
 ```python
@@ -125,7 +125,8 @@ N_EPISODES = 300
 
 `openenv collect` runs the teacher model inside the environment and records every episode — the
 environment's `step()` reward is written alongside the messages, so filtering by correctness requires
-no additional scoring code.
+no additional scoring code. By default it drops rollouts with a negative reward (`--keep-losses` keeps
+them). Reasoning Gym scores a wrong answer `0.0`, so wrong answers are kept here and filtered in section 6.
 
 ```python
 import json, shlex
@@ -145,6 +146,21 @@ hub_repo_arg = shlex.quote(f"{YOUR_HF_USERNAME}/chain-sum-rollouts")
   --push-to-hub {hub_repo_arg} \
   --output-dir ./rollouts
 ```
+
+To use a self-hosted teacher instead of a hosted provider, point `--llm-endpoint` at any
+OpenAI-compatible server (vLLM, TGI, Ollama) and pass the model id it serves:
+
+```bash
+openenv collect reasoning_gym:chain_sum \
+  --base-url https://sergiopaniego-reasoning-gym.hf.space \
+  --llm-endpoint http://localhost:8000 \
+  --model Qwen/Qwen3-8B \
+  --num-episodes 300 \
+  --output-dir ./rollouts
+```
+
+The teacher drives the environment through tool calls, so the server must have tool calling
+enabled (for vLLM: `--enable-auto-tool-choice --tool-call-parser <parser for your model>`).
 
 The command prints a live progress summary and pushes the collected episodes to the Hub as
 `{YOUR_HF_USERNAME}/chain-sum-rollouts`. Pull them back to start filtering:
@@ -188,8 +204,9 @@ rollouts = [to_qwen3_messages(r) for r in raw_rollouts]
 
 ## 6. Filter the dataset
 
-Keep only episodes where the teacher answered correctly. The environment's reward signal does the
-labelling — no manual annotation needed.
+Keep only episodes where the teacher answered correctly. `openenv collect` already dropped negative
+rewards, and this filter also removes the wrong answers, which score `0.0`. The environment's reward
+signal does the labelling — no manual annotation needed.
 
 ```python
 correct = [r for r in rollouts if r["reward"] == 1.0]
@@ -300,10 +317,9 @@ trainer.train()
 trainer.push_to_hub(commit_message="SFT warm-up on reasoning_gym chain_sum")
 ```
 
-```{note}
-Training ~270 examples for 3 epochs takes around 5 minutes on a single A100 (40 GB). The goal is format
-compliance, not task mastery — a handful of epochs is enough. Mastery comes from GRPO.
-```
+> [!NOTE]
+> Training ~270 examples for 3 epochs takes around 5 minutes on a single A100 (40 GB). The goal is format
+> compliance, not task mastery — a handful of epochs is enough. Mastery comes from GRPO.
 
 ---
 
@@ -402,8 +418,8 @@ environment's scorer to award any credit.
 ## 11. Where to go next: GRPO
 
 The SFT checkpoint is ready to use as the starting model for GRPO. In the
-[end-to-end walkthrough](https://meta-pytorch.org/OpenEnv/tutorials/end-to-end-walkthrough.html),
-change one line in section 8:
+[end-to-end walkthrough](end-to-end-walkthrough),
+change one line in section 7:
 
 ```python
 # Before (cold-start from the base model):
@@ -413,7 +429,7 @@ MODEL_NAME = "Qwen/Qwen3-1.7B"
 MODEL_NAME = f"{YOUR_HF_USERNAME}/reasoning-gym-chain-sum-Qwen3-1.7B-sft"
 ```
 
-With format compliance already near 100%, GRPO's `reward_std` will be non-zero from the very first
+With most completions already in the right format, GRPO's `reward_std` will be non-zero from the very first
 batch and the reward curve will climb immediately — no cold-start stall.
 
 **Other directions:**
@@ -423,5 +439,6 @@ batch and the reward curve will climb immediately — no cold-start stall.
 - **Different environments.** The same pipeline — teacher collects → filter → SFT → GRPO — applies to
   any OpenEnv environment. Swap `reasoning_gym_env` and the `answer` tool definition for your env's
   tool surface.
-- **Larger teacher.** `gpt-5` or `claude-opus-4` as teacher will yield higher-quality examples,
-  especially for tasks where `gpt-5-mini` struggles.
+- **Larger teacher.** A stronger model, such as `claude-opus-5-5` (`--provider anthropic`) or
+  `Qwen/Qwen3-32B` served behind `--llm-endpoint`, yields higher-quality examples on tasks where
+  `gpt-5-mini` struggles.

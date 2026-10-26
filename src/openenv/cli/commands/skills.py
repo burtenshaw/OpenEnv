@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """Commands to manage OpenEnv CLI skills for AI assistants."""
 
@@ -23,7 +19,7 @@ name: openenv-cli
 description: "OpenEnv CLI (`openenv`) for scaffolding, validating, building, and pushing OpenEnv environments."
 ---
 
-Install: `pip install openenv-core`
+Install: `pip install openenv`
 
 The OpenEnv CLI command `openenv` is available.
 Use `openenv --help` to view available commands.
@@ -42,7 +38,7 @@ _SKILL_TIPS = """
 
 Use `openenv <command> --help` for full flag reference.
 
-Full CLI reference: https://meta-pytorch.org/OpenEnv/cli.html
+Full CLI reference: https://huggingface.co/docs/openenv/reference/cli
 """
 
 CENTRAL_LOCAL = Path(".agents/skills")
@@ -62,6 +58,8 @@ LOCAL_TARGETS = {
     "opencode": Path(".opencode/skills"),
 }
 
+_AGENT_TARGET_ORDER = ("claude", "codex", "cursor", "opencode")
+
 app = typer.Typer(help="Manage OpenEnv skills for AI assistants")
 
 
@@ -72,7 +70,7 @@ def _build_skill_md() -> str:
     lines = _SKILL_YAML_PREFIX.splitlines()
     lines.append("")
     lines.append(
-        f"Generated with `openenv-core v{__version__}`. Run `openenv skills add --force` to regenerate."
+        f"Generated with `openenv v{__version__}`. Run `openenv skills add --force` to regenerate."
     )
     lines.extend(_SKILL_TIPS.splitlines())
     return "\n".join(lines).strip() + "\n"
@@ -128,6 +126,12 @@ def _create_symlink(
 
     link_path.symlink_to(os.path.relpath(central_skill_path, agent_skills_dir))
     return link_path
+
+
+def _selected_agent_targets(
+    targets: dict[str, Path], selected_agents: dict[str, bool]
+) -> list[Path]:
+    return [targets[agent] for agent in _AGENT_TARGET_ORDER if selected_agents[agent]]
 
 
 @app.command("preview")
@@ -191,16 +195,15 @@ def skills_add(
     )
 
     targets = GLOBAL_TARGETS if global_ else LOCAL_TARGETS
-    agent_targets: list[Path] = []
-
-    if claude:
-        agent_targets.append(targets["claude"])
-    if codex:
-        agent_targets.append(targets["codex"])
-    if cursor:
-        agent_targets.append(targets["cursor"])
-    if opencode:
-        agent_targets.append(targets["opencode"])
+    agent_targets = _selected_agent_targets(
+        targets,
+        {
+            "claude": claude,
+            "codex": codex,
+            "cursor": cursor,
+            "opencode": opencode,
+        },
+    )
 
     for agent_target in agent_targets:
         link_path = _create_symlink(agent_target, central_skill_path, force)

@@ -13,28 +13,15 @@ over HTTP.
 
 from typing import Any, Dict
 
+from openenv.core.client_types import StepResult
+from openenv.core.env_client import EnvClient
+from openenv.core.env_server.types import State
+
 # Support both in-repo and standalone imports
 try:
-    # In-repo imports (when running from OpenEnv repository)
-    from openenv.core.client_types import StepResult
-    from openenv.core.env_client import EnvClient
-    from openenv.core.env_server.types import State
-
     from .models import OpenAppAction, OpenAppObservation
 except ImportError:
-    try:
-        from openapp_env.models import OpenAppAction, OpenAppObservation
-
-        # Standalone imports when openenv is available.
-        from openenv.core.client_types import StepResult
-        from openenv.core.env_client import EnvClient
-        from openenv.core.env_server.types import State
-    except ImportError:
-        # Backward-compatible standalone imports when only openenv_core is available.
-        from openenv_core.client_types import StepResult
-        from openenv_core.env_client import EnvClient
-        from openenv_core.env_server.types import State
-        from openapp_env.models import OpenAppAction, OpenAppObservation
+    from openapp_env.models import OpenAppAction, OpenAppObservation
 
 
 class OpenAppEnv(EnvClient[OpenAppAction, OpenAppObservation, State]):
@@ -123,13 +110,14 @@ class OpenAppEnv(EnvClient[OpenAppAction, OpenAppObservation, State]):
             last_action_error=obs_data.get("last_action_error"),
             done=payload.get("done", False),
             reward=payload.get("reward"),
-            metadata=obs_data.get("metadata", {}),
+            metadata=payload.get("metadata", obs_data.get("metadata", {})),
         )
 
         return StepResult(
             observation=observation,
             reward=payload.get("reward"),
             done=payload.get("done", False),
+            metadata=payload.get("metadata"),
         )
 
     def _parse_state(self, payload: Dict) -> State:
