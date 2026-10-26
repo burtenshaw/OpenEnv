@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,13 +21,16 @@ def sandbox(monkeypatch):
 
 
 def test_local_timeout_returns_partial_output(sandbox, monkeypatch):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(
-            args[0], 1, output=b"partial", stderr=b"warning"
-        )
-
-    monkeypatch.setattr(local_sandbox.subprocess, "run", timeout)
-    result = sandbox.run_shell("sleep 10", timeout_s=1)
+    monkeypatch.setattr(
+        sandbox,
+        "_bwrap_command",
+        lambda _: [
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'partial'); os.write(2,b'warning'); time.sleep(10)",
+        ],
+    )
+    result = sandbox.run_shell("unused", timeout_s=0.2)
     assert not result.success
     assert result.stdout == "partial"
     assert result.stderr == "warning"
@@ -88,12 +90,21 @@ def test_local_timeout_stays_in_environment_result(sandbox, monkeypatch, phase):
     from openenv.core.env_server.mcp_types import CallToolAction
     from terminus_env.server.terminus_env_environment import TerminusEnvironment
 
-    def run(command, **kwargs):
-        if command[-1] == "hang":
-            raise subprocess.TimeoutExpired(command, 1)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr(local_sandbox.subprocess, "run", run)
+    monkeypatch.setattr(
+        sandbox,
+        "_bwrap_command",
+        lambda command: [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(2)" if command == "hang" else "pass",
+        ],
+    )
+    run_shell = sandbox.run_shell
+    monkeypatch.setattr(
+        sandbox,
+        "run_shell",
+        lambda command, **kwargs: run_shell(command, timeout_s=0.2),
+    )
     monkeypatch.setattr(
         "terminus_env.server.terminus_env_environment.LocalSandbox",
         lambda **kwargs: sandbox,

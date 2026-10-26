@@ -78,6 +78,9 @@ docker run -p 8000:8000 -e HF_TOKEN=hf_... terminus-env
 The local backend requires `bwrap` on the server node and is intended for simple
 cluster smoke tasks. Use the default `hf` backend for
 stronger remote sandboxing.
+Each command runs in its own PID namespace and requires PID namespace support.
+Timeouts terminate the command tree; background processes also end when the shell
+exits successfully. Files in the sandbox home persist between commands.
 
 ## Setup and Verify Commands
 

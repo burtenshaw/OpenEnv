@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import signal
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -29,10 +31,12 @@ class LocalSandbox:
     """Runs shell commands in a persistent bubblewrap-backed home directory."""
 
     def __init__(self, *, root: str | None = None, **_: object):
-        if shutil.which("bwrap") is None:
+        executable = shutil.which("bwrap")
+        if executable is None:
             raise RuntimeError(
                 "local sandbox backend requires `bwrap` on the sandbox node"
             )
+        self._bwrap = str(Path(executable).resolve())
         self._tmp = tempfile.TemporaryDirectory(prefix="terminus-sandbox-", dir=root)
         self._home = Path(self._tmp.name) / "home" / "user"
         self._tmp_dir = Path(self._tmp.name) / "tmp"
@@ -41,42 +45,45 @@ class LocalSandbox:
         self.sandbox_id = Path(self._tmp.name).name
 
     def run_shell(self, command: str, timeout_s: int = 120) -> ShellResult:
-        try:
-            process = subprocess.run(
+        # Files avoid waiting for EOF on pipes inherited by descendants.
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = subprocess.Popen(
                 self._bwrap_command(command),
-                text=True,
-                capture_output=True,
-                timeout=timeout_s,
-                check=False,
+                stdout=stdout,
+                stderr=stderr,
+                start_new_session=True,
                 env={"HOME": "/home/user", "PATH": "/usr/local/bin:/usr/bin:/bin"},
             )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
+            error = None
+            try:
+                process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                error = f"command timed out after {timeout_s}s"
+            finally:
+                # Also remove background children after a successful shell exit.
+                # The PID namespace covers descendants that escape this group.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            stdout.seek(0)
+            stderr.seek(0)
+            success = error is None and process.returncode == 0
             return ShellResult(
-                stdout=stdout.decode(errors="replace")
-                if isinstance(stdout, bytes)
-                else stdout,
-                stderr=stderr.decode(errors="replace")
-                if isinstance(stderr, bytes)
-                else stderr,
-                error=f"command timed out after {timeout_s}s",
-                success=False,
+                stdout=stdout.read().decode(errors="replace"),
+                stderr=stderr.read().decode(errors="replace"),
+                error=error or (None if success else f"exit code {process.returncode}"),
+                success=success,
             )
-        success = process.returncode == 0
-        return ShellResult(
-            stdout=process.stdout or "",
-            stderr=process.stderr or "",
-            error=None if success else f"exit code {process.returncode}",
-            success=success,
-        )
 
     def kill(self) -> None:
         self._tmp.cleanup()
 
     def _bwrap_command(self, command: str) -> list[str]:
         return [
-            "bwrap",
+            self._bwrap,
+            "--unshare-pid",
             "--die-with-parent",
             "--dev",
             "/dev",
