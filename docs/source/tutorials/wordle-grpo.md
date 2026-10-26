@@ -8,9 +8,11 @@ This tutorial trains [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) to pla
 |---|---|---|---|
 | [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | 0/30 | - | 24 |
 | + SFT ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT)) | 10/30 | 3.2 | 33 |
-| + SFT + GRPO ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT-GRPO)) | 19/30 | 4.0 | 3 |
+| + SFT + GRPO ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT-GRPO)) | 19/30 | 3.9 | 3 |
 
 These numbers come from our run, with one training run per step, evaluated greedily on the same 30 words ([`secrets30.txt`](https://github.com/openenv/OpenEnv/blob/main/examples/wordle/secrets30.txt)). Thirty words is a small sample and training is not deterministic, so a new run will land a few wins away. Two SFT runs with the same recipe won 10 and 13 games, for example. Expect the same ordering (base, SFT, then SFT + GRPO clearly ahead) rather than the exact numbers.
+
+These results predate a fix to count terminal invalid moves toward the training penalty. The current script penalizes both invalid-move warnings and terminal invalid moves.
 
 The 30 words come from the 156 nouns TextArena draws its secrets from, the same list used for the SFT games and during GRPO. So the table measures how well each model plays the words of this environment. We did not test words outside that list.
 

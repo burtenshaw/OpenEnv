@@ -101,7 +101,7 @@ def play(model, tokenizer, env, args):
         new_full = result.observation.messages[0].content
         feedback, full = new_full[len(full) :], new_full
         reward, done = (
-            (0.0 if "invalid move" in feedback else result.reward or 0.0),
+            (0.0 if "invalid move" in feedback.lower() else result.reward or 0.0),
             result.done,
         )
         match = FEEDBACK.search(feedback)

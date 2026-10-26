@@ -104,7 +104,7 @@ def main():
             full_feedback = result.observation.messages[0].content
             feedback = full_feedback[len(self._last_full_feedback) :]
             self._last_full_feedback = full_feedback
-            if "You attempted an invalid move" in feedback:
+            if "invalid move" in feedback.lower():
                 self.invalid_moves += 1
             else:
                 self.num_guesses += 1
