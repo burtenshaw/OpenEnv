@@ -1,9 +1,9 @@
-# RFC 006: Hugging Face RL Environment Datasets
+# RFC 014: Hugging Face RL Environment Datasets
 
 **Status**: In Review
 **Created**: 2026-05-21
-**Authors**: @ben
-**RFC ID**: 006
+**Authors**: @burtenshaw
+**RFC ID**: 014
 
 ## Summary
 
