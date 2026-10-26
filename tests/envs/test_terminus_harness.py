@@ -229,3 +229,23 @@ def test_terminus_session_factory_works_with_generic_rollout_helper():
     assert result["completion_ids"] == [[5, 6]]
     assert result["logprobs"] == [[-0.3, -0.4]]
     assert result["env_reward"] == [1.0]
+
+
+def test_initial_prompt_reports_failed_reset(monkeypatch):
+    from terminus_env.harness import _format_initial_prompt
+    from terminus_env.server.terminus_env_environment import TerminusEnvironment
+
+    def fail_create(**kwargs):
+        raise RuntimeError("synthetic creation failure")
+
+    monkeypatch.setattr(
+        "terminus_env.server.terminus_env_environment.HFSandbox", fail_create
+    )
+    observation = TerminusEnvironment().reset()
+    result = StepResult(observation=observation, done=True, reward=None)
+    prompt = _format_initial_prompt(
+        result, {"instruction": "task", "setup": ["echo setup"]}
+    )
+    assert "synthetic creation failure" in prompt
+    assert "Setup commands have already run" not in prompt
+    assert "inspect and modify the sandbox" not in prompt

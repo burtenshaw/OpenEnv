@@ -15,6 +15,7 @@ description = "Single-tool coding environment for OpenEnv"
 requires-python = ">=3.10"
 dependencies = [
     "openenv-core[core]>=0.2.2",
+    "hf-sandbox>=0.1.1",
     "fastapi>=0.115.0",
     "fastmcp>=3.0.0",
     "gradio>=4.0.0",

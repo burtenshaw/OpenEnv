@@ -66,7 +66,7 @@ docker run -p 8000:8000 -e HF_TOKEN=hf_... terminus-env
 
 - `TERMINUS_SANDBOX_BACKEND`: `local` for the lightweight cluster smoke
   backend, or `hf` for `hf-sandbox`. Defaults to `hf`.
-- `HF_TOKEN`: required by the optional `hf-sandbox` backend to launch
+- `HF_TOKEN`: required by the default `hf-sandbox` backend to launch
   Hugging Face Jobs.
 - `HF_SANDBOX_IMAGE`: sandbox image. Defaults to `python:3.12`.
 - `HF_SANDBOX_FLAVOR`: Hugging Face Jobs flavor. Defaults to `cpu-basic`.
@@ -76,7 +76,7 @@ docker run -p 8000:8000 -e HF_TOKEN=hf_... terminus-env
 - `MAX_CONCURRENT_ENVS`: maximum concurrent WebSocket sessions. Defaults to `4`.
 
 The local backend requires `bwrap` on the server node and is intended for simple
-cluster smoke tasks. Install the `hf` extra and use the `hf` backend for
+cluster smoke tasks. Use the default `hf` backend for
 stronger remote sandboxing.
 
 ## Setup and Verify Commands

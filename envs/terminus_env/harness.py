@@ -106,6 +106,10 @@ def _format_initial_prompt(result: Any, task: Any) -> str:
     else:
         parts.append("Task:\nUse the terminal tool to solve the current task.")
 
+    if metadata.get("error"):
+        parts.append(f"Environment reset failed:\n{metadata['error']}")
+        return "\n\n".join(parts)
+
     reset_message = metadata.get("message")
     if reset_message:
         parts.append(f"Environment:\n{reset_message}")

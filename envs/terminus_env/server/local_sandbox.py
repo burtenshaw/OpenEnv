@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -42,13 +41,28 @@ class LocalSandbox:
         self.sandbox_id = Path(self._tmp.name).name
 
     def run_shell(self, command: str, timeout_s: int = 120) -> ShellResult:
-        process = subprocess.run(
-            self._bwrap_command(command),
-            text=True,
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-        )
+        try:
+            process = subprocess.run(
+                self._bwrap_command(command),
+                text=True,
+                capture_output=True,
+                timeout=timeout_s,
+                check=False,
+                env={"HOME": "/home/user", "PATH": "/usr/local/bin:/usr/bin:/bin"},
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            return ShellResult(
+                stdout=stdout.decode(errors="replace")
+                if isinstance(stdout, bytes)
+                else stdout,
+                stderr=stderr.decode(errors="replace")
+                if isinstance(stderr, bytes)
+                else stderr,
+                error=f"command timed out after {timeout_s}s",
+                success=False,
+            )
         success = process.returncode == 0
         return ShellResult(
             stdout=process.stdout or "",
@@ -100,7 +114,7 @@ class LocalSandbox:
             "/home/user",
             "--setenv",
             "PATH",
-            os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+            "/usr/local/bin:/usr/bin:/bin",
             "/bin/bash",
             "-lc",
             command,

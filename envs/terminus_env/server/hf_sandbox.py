@@ -44,7 +44,7 @@ class HFSandbox:
         image: str | None = None,
         flavor: str | None = None,
         timeout: str | None = None,
-        forward_hf_token: bool | None = None,
+        forward_hf_token: bool | str | None = None,
     ):
         if Sandbox is None:
             raise ImportError(
@@ -57,7 +57,7 @@ class HFSandbox:
             os.getenv("HF_SANDBOX_FORWARD_HF_TOKEN", "false")
         )
         if forward_hf_token is not None:
-            resolved_forward = bool(forward_hf_token)
+            resolved_forward = _coerce_bool(str(forward_hf_token))
 
         self._sandbox = Sandbox.create(
             image=image or os.getenv("HF_SANDBOX_IMAGE", DEFAULT_IMAGE),
