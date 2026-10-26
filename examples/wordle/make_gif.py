@@ -118,7 +118,10 @@ def main():
     parser.add_argument("--out", default="progress.gif")
     args = parser.parse_args()
 
-    columns = [[json.loads(line) for line in open(path)] for path in args.games]
+    columns = []
+    for path in args.games:
+        with open(path) as games_file:
+            columns.append([json.loads(line) for line in games_file])
     labels = args.labels or [c[0]["model"].split("/")[-1] for c in columns]
     imgs = frames(columns, labels)
     imgs[0].save(args.out, save_all=True, append_images=imgs[1:], duration=450, loop=0)
