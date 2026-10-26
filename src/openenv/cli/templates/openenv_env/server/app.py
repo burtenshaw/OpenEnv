@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """
 FastAPI application for the __ENV_TITLE_NAME__ Environment.
@@ -53,7 +49,7 @@ app = create_app(
 )
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+def main():
     """
     Entry point for direct execution via uv run or python -m.
 
@@ -62,23 +58,20 @@ def main(host: str = "0.0.0.0", port: int = 8000):
         uv run --project . server --port 8001
         python -m __ENV_NAME__.server.app
 
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
     For production deployments, consider using uvicorn directly with
     multiple workers:
         uvicorn __ENV_NAME__.server.app:app --workers 4
     """
+    import argparse
+
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()

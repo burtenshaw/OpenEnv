@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """Tests for the REPL Environment."""
 
@@ -228,6 +224,32 @@ class TestREPLEnvironment:
         obs = env.step(REPLAction(code="print('FINAL(42)')"))
         assert obs.done
         assert obs.metadata["final_answer"] == "42"
+
+    @pytest.mark.parametrize(
+        "code, expected",
+        [
+            # Nested function calls inside FINAL(...).
+            ("print('FINAL(f(x))')", "f(x)"),
+            # Tuple as the final answer.
+            ("print('FINAL((1, 2, 3))')", "(1, 2, 3)"),
+            # Math expression with multiple nested parens (e2b_repl_example).
+            (
+                "print('FINAL(2^(2^(2^(2))) = 65536)')",
+                "2^(2^(2^(2))) = 65536",
+            ),
+            # Dict containing a tuple value.
+            ("print(\"FINAL({'a': (1, 2)})\")", "{'a': (1, 2)}"),
+            # Output after FINAL must not bleed into the extracted answer.
+            ("print('FINAL(42)\\nresult: (ok)')", "42"),
+        ],
+    )
+    def test_final_pattern_nested_parentheses(self, code, expected):
+        """FINAL(...) extraction must handle nested parentheses (rlm #75)."""
+        env = REPLEnvironment()
+        env.reset()
+        obs = env.step(REPLAction(code=code))
+        assert obs.done
+        assert obs.metadata["final_answer"] == expected
 
     def test_final_var_pattern(self):
         """Test FINAL_VAR() pattern."""
@@ -942,7 +964,7 @@ class TestREPLEnvRemoteClient:
                 return {"data": {}}
             raise AssertionError(f"Unexpected message type: {message['type']}")
 
-        monkeypatch.setattr(env.async_client, "connect", fake_connect)
+        monkeypatch.setattr(env.async_client, "_connect_async", fake_connect)
         monkeypatch.setattr(
             env.async_client, "_send_and_receive", fake_send_and_receive
         )

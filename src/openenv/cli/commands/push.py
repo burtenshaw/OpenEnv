@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """Push an OpenEnv environment to Hugging Face Spaces."""
 
@@ -19,12 +15,12 @@ import typer
 import yaml
 from huggingface_hub import HfApi, login, whoami
 
-from .._cli_utils import console, validate_env_structure
+from .._cli_utils import _extract_hf_username, console, validate_env_structure
 
 app = typer.Typer(help="Push an OpenEnv environment to Hugging Face Spaces")
 
 
-DEFAULT_PUSH_IGNORE_PATTERNS = [".*", "__pycache__", "*.pyc"]
+DEFAULT_PUSH_IGNORE_PATTERNS = [".*", "__pycache__", "*.pyc", "build/", "*.egg-info"]
 
 
 def _format_kv_entry_for_error(entry: str, *, flag: str) -> str:
@@ -215,7 +211,7 @@ def _validate_openenv_directory(directory: Path) -> tuple[str, dict]:
     Validate that the directory is an OpenEnv environment.
 
     Returns:
-        Tuple of (env_name, manifest_data)
+        `tuple` of `(env_name, manifest_data)`.
     """
     # Use the comprehensive validation function
     try:
@@ -243,36 +239,83 @@ def _validate_openenv_directory(directory: Path) -> tuple[str, dict]:
     return env_name, manifest
 
 
+def _rewrite_dockerfile_for_space(
+    dockerfile_content: str,
+    *,
+    base_image: str | None,
+    enable_interface: bool,
+) -> tuple[str, list[str]]:
+    """Rewrite deployment Dockerfile content and return printed change labels."""
+    lines = dockerfile_content.split("\n")
+    new_lines = []
+    cmd_found = False
+    base_image_updated = False
+    web_interface_env_exists = "ENABLE_WEB_INTERFACE" in dockerfile_content
+    last_instruction = None
+
+    for line in lines:
+        stripped = line.strip()
+        token = stripped.split(maxsplit=1)[0] if stripped else ""
+        current_instruction = token.upper()
+
+        is_healthcheck_continuation = last_instruction == "HEALTHCHECK"
+
+        # Update base image if specified
+        if base_image and stripped.startswith("FROM") and not base_image_updated:
+            new_lines.append(f"FROM {base_image}")
+            base_image_updated = True
+            last_instruction = "FROM"
+            continue
+
+        if (
+            stripped.startswith("CMD")
+            and not cmd_found
+            and not web_interface_env_exists
+            and enable_interface
+            and not is_healthcheck_continuation
+        ):
+            new_lines.append("ENV ENABLE_WEB_INTERFACE=true")
+            cmd_found = True
+
+        new_lines.append(line)
+
+        if current_instruction:
+            last_instruction = current_instruction
+
+    if not cmd_found and not web_interface_env_exists and enable_interface:
+        new_lines.append("ENV ENABLE_WEB_INTERFACE=true")
+
+    if base_image and not base_image_updated:
+        new_lines.insert(0, f"FROM {base_image}")
+
+    changes = []
+    if base_image and base_image_updated:
+        changes.append("updated base image")
+    if enable_interface and not web_interface_env_exists:
+        changes.append("enabled web interface")
+
+    return "\n".join(new_lines), changes
+
+
+def _get_hf_username() -> str:
+    """Return the authenticated Hugging Face username from whoami()."""
+    username = _extract_hf_username(whoami())
+    if not username:
+        raise ValueError("Could not extract username from whoami response")
+
+    console.print(f"[bold green]✓[/bold green] Authenticated as: {username}")
+    return username
+
+
 def _ensure_hf_authenticated() -> str:
     """
     Ensure user is authenticated with Hugging Face.
 
     Returns:
-        Username of authenticated user
+        `str`: username of the authenticated user.
     """
     try:
-        # Try to get current user
-        user_info = whoami()
-        # Handle both dict and object return types
-        if isinstance(user_info, dict):
-            username = (
-                user_info.get("name")
-                or user_info.get("fullname")
-                or user_info.get("username")
-            )
-        else:
-            # If it's an object, try to get name attribute
-            username = (
-                getattr(user_info, "name", None)
-                or getattr(user_info, "fullname", None)
-                or getattr(user_info, "username", None)
-            )
-
-        if not username:
-            raise ValueError("Could not extract username from whoami response")
-
-        console.print(f"[bold green]✓[/bold green] Authenticated as: {username}")
-        return username
+        return _get_hf_username()
     except Exception:
         # Not authenticated, prompt for login
         console.print(
@@ -281,27 +324,7 @@ def _ensure_hf_authenticated() -> str:
 
         try:
             login()
-            # Verify login worked
-            user_info = whoami()
-            # Handle both dict and object return types
-            if isinstance(user_info, dict):
-                username = (
-                    user_info.get("name")
-                    or user_info.get("fullname")
-                    or user_info.get("username")
-                )
-            else:
-                username = (
-                    getattr(user_info, "name", None)
-                    or getattr(user_info, "fullname", None)
-                    or getattr(user_info, "username", None)
-                )
-
-            if not username:
-                raise ValueError("Could not extract username from whoami response")
-
-            console.print(f"[bold green]✓[/bold green] Authenticated as: {username}")
-            return username
+            return _get_hf_username()
         except Exception as e:
             raise typer.BadParameter(
                 f"Hugging Face authentication failed: {e}. Please run login manually."
@@ -358,55 +381,12 @@ def _prepare_staging_directory(
     # Modify Dockerfile to optionally enable web interface and update base image
     if dockerfile_path and dockerfile_path.exists():
         dockerfile_content = dockerfile_path.read_text()
-        lines = dockerfile_content.split("\n")
-        new_lines = []
-        cmd_found = False
-        base_image_updated = False
-        web_interface_env_exists = "ENABLE_WEB_INTERFACE" in dockerfile_content
-        last_instruction = None
-
-        for line in lines:
-            stripped = line.strip()
-            token = stripped.split(maxsplit=1)[0] if stripped else ""
-            current_instruction = token.upper()
-
-            is_healthcheck_continuation = last_instruction == "HEALTHCHECK"
-
-            # Update base image if specified
-            if base_image and stripped.startswith("FROM") and not base_image_updated:
-                new_lines.append(f"FROM {base_image}")
-                base_image_updated = True
-                last_instruction = "FROM"
-                continue
-
-            if (
-                stripped.startswith("CMD")
-                and not cmd_found
-                and not web_interface_env_exists
-                and enable_interface
-                and not is_healthcheck_continuation
-            ):
-                new_lines.append("ENV ENABLE_WEB_INTERFACE=true")
-                cmd_found = True
-
-            new_lines.append(line)
-
-            if current_instruction:
-                last_instruction = current_instruction
-
-        if not cmd_found and not web_interface_env_exists and enable_interface:
-            new_lines.append("ENV ENABLE_WEB_INTERFACE=true")
-
-        if base_image and not base_image_updated:
-            new_lines.insert(0, f"FROM {base_image}")
-
-        dockerfile_path.write_text("\n".join(new_lines))
-
-        changes = []
-        if base_image and base_image_updated:
-            changes.append("updated base image")
-        if enable_interface and not web_interface_env_exists:
-            changes.append("enabled web interface")
+        dockerfile_content, changes = _rewrite_dockerfile_for_space(
+            dockerfile_content,
+            base_image=base_image,
+            enable_interface=enable_interface,
+        )
+        dockerfile_path.write_text(dockerfile_content)
         if changes:
             console.print(
                 f"[bold green]✓[/bold green] Updated Dockerfile: {', '.join(changes)}"
@@ -441,8 +421,8 @@ def _prepare_staging_directory(
                     frontmatter = f"""---
 title: {env_name.replace("_", " ").title()} Environment Server
 emoji: 🔊
-colorFrom: '#00C9FF'
-colorTo: '#1B2845'
+colorFrom: blue
+colorTo: indigo
 sdk: docker
 pinned: false
 app_port: 8000
@@ -495,6 +475,7 @@ def _upload_to_hf_space(
     private: bool = False,
     create_pr: bool = False,
     commit_message: str | None = None,
+    delete_patterns: list[str] | None = None,
 ) -> None:
     """Upload files to Hugging Face Space."""
     if create_pr:
@@ -510,6 +491,7 @@ def _upload_to_hf_space(
         "repo_type": "space",
         "create_pr": create_pr,
         "ignore_patterns": ignore_patterns,
+        "delete_patterns": delete_patterns,
     }
     if commit_message:
         upload_kwargs["commit_message"] = commit_message
@@ -593,6 +575,13 @@ def push(
             help="Optional additional ignore file with newline-separated glob patterns to exclude from Hugging Face uploads",
         ),
     ] = None,
+    delete: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--delete",
+            help="Glob pattern of remote Space files to delete in the same commit, as in `hf upload --delete` (repeatable). Use '*' to remove every file not uploaded again.",
+        ),
+    ] = None,
     hardware: Annotated[
         str | None,
         typer.Option(
@@ -638,6 +627,8 @@ def push(
     but disabled by default when pushing to a custom Docker registry.
 
     Examples:
+
+        ```bash
         # Push to HuggingFace Spaces from current directory (web interface enabled)
         $ cd my_env
         $ openenv push
@@ -662,7 +653,7 @@ def push(
         $ openenv push --repo-id my-org/my-env
 
         # Push privately with custom base image
-        $ openenv push --private --base-image ghcr.io/meta-pytorch/openenv-base:latest
+        $ openenv push --private --base-image ghcr.io/huggingface/openenv-base:latest
 
         # Push with GPU hardware
         $ openenv push --hardware t4-medium
@@ -672,6 +663,7 @@ def push(
 
         # Set a private Space secret (value never logged)
         $ openenv push --secret OPENAI_API_KEY=sk-...
+        ```
     """
     # Validate --count flag combinations
     if count > 1 and registry:
@@ -863,6 +855,7 @@ def push(
                     private=private,
                     create_pr=False,
                     ignore_patterns=ignore_patterns,
+                    delete_patterns=delete,
                 )
                 _apply_space_variables_and_secrets(
                     instance_repo_id, merged_variables, cli_secrets, api
@@ -888,6 +881,7 @@ def push(
                 private=private,
                 create_pr=create_pr,
                 ignore_patterns=ignore_patterns,
+                delete_patterns=delete,
             )
 
             # Skip variable/secret configuration in PR mode since the target

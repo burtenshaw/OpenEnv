@@ -1,8 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+# SPDX-License-Identifier: BSD-3-Clause
 
 """
 HTTP server wrapper for Environment instances.
@@ -22,9 +18,20 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack
-from typing import Any, AsyncContextManager, Callable, cast, Dict, Optional, Type
+from typing import (
+    Any,
+    AsyncContextManager,
+    Awaitable,
+    Callable,
+    cast,
+    Dict,
+    Optional,
+    Type,
+    TypeVar,
+)
 
 _MISSING = object()
+_MCPResult = TypeVar("_MCPResult")
 
 from fastapi import (
     Body,
@@ -37,12 +44,17 @@ from fastapi import (
 )
 from pydantic import ValidationError
 
+from ._utils import overrides_method
 from .interfaces import Environment
 from .mcp_environment import get_server_tools
 from .mcp_types import (
+    CallToolAction,
+    CallToolObservation,
     JsonRpcErrorCode,
     JsonRpcRequest,
     JsonRpcResponse,
+    ListToolsAction,
+    ListToolsObservation,
     McpMethod,
     WSMCPMessage,
     WSMCPResponse,
@@ -53,8 +65,12 @@ from .types import (
     Action,
     ConcurrencyConfig,
     EnvironmentMetadata,
+    GetTaskRangeRequest,
+    GetTaskRequest,
     HealthResponse,
     HealthStatus,
+    ListTasksRequest,
+    NumTasksRequest,
     Observation,
     ResetRequest,
     ResetResponse,
@@ -83,10 +99,11 @@ def _make_json_serializable(obj: Any) -> Any:
     Handles Pydantic models, dataclasses, and other common types.
 
     Args:
-        obj: The object to convert
+        obj (`Any`):
+            The object to convert.
 
     Returns:
-        A JSON-serializable representation of the object
+        `Any`: A JSON-serializable representation of the object.
     """
     if obj is None:
         return None
@@ -104,6 +121,13 @@ def _make_json_serializable(obj: Any) -> Any:
         return {k: _make_json_serializable(v) for k, v in obj.__dict__.items()}
     # Fallback to string representation
     return str(obj)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await values returned by async task APIs while preserving sync APIs."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 from .exceptions import (
@@ -124,23 +148,26 @@ class HTTPEnvServer:
     - Action deserialization: Converts JSON dict to Action subclass
     - Observation serialization: Converts Observation subclass to JSON dict
 
-    Example:
-        >>> from core.env_server import HTTPEnvServer
-        >>> from envs.coding_env.server import CodeExecutionEnvironment
-        >>> from envs.coding_env.models import CodeAction, CodeObservation
-        >>>
-        >>> # Pass environment class (factory pattern)
-        >>> server = HTTPEnvServer(
-        ...     env=CodeExecutionEnvironment,
-        ...     action_cls=CodeAction,
-        ...     observation_cls=CodeObservation,
-        ...     max_concurrent_envs=4,
-        ... )
-        >>>
-        >>> # Register routes with FastAPI
-        >>> from fastapi import FastAPI
-        >>> app = FastAPI()
-        >>> server.register_routes(app)
+    Examples:
+
+        ```python
+        from core.env_server import HTTPEnvServer
+        from envs.coding_env.server import CodeExecutionEnvironment
+        from envs.coding_env.models import CodeAction, CodeObservation
+
+        # Pass environment class (factory pattern)
+        server = HTTPEnvServer(
+            env=CodeExecutionEnvironment,
+            action_cls=CodeAction,
+            observation_cls=CodeObservation,
+            max_concurrent_envs=4,
+        )
+
+        # Register routes with FastAPI
+        from fastapi import FastAPI
+        app = FastAPI()
+        server.register_routes(app)
+        ```
     """
 
     def __init__(
@@ -150,24 +177,42 @@ class HTTPEnvServer:
         observation_cls: Type[Observation],
         max_concurrent_envs: Optional[int] = None,
         concurrency_config: Optional[ConcurrencyConfig] = None,
+        env_name: Optional[str] = None,
+        state_cls: Type[State] = State,
+        *,
+        reset_observation_cls: Optional[Type[Observation]] = None,
     ):
         """
         Initialize HTTP server wrapper.
 
         Args:
-            env: Environment factory (callable) that creates new instances.
-                 Will be called to create a new environment for each WebSocket session.
-            action_cls: The Action subclass this environment expects
-            observation_cls: The Observation subclass this environment returns
-            max_concurrent_envs: Maximum number of concurrent WebSocket sessions.
-                                 Mutually exclusive with concurrency_config.
-            concurrency_config: Optional ConcurrencyConfig for advanced concurrency settings.
-                                Mutually exclusive with max_concurrent_envs.
+            env (`Callable[[], Environment]`):
+                Environment factory (callable) that creates new instances. Will be called
+                to create a new environment for each WebSocket session.
+            action_cls (`Type[Action]`):
+                The `Action` subclass this environment expects.
+            observation_cls (`Type[Observation]`):
+                The `Observation` subclass returned by step.
+            reset_observation_cls (`Type[Observation]`, *optional*):
+                The reset observation model published in `/schema`. Defaults to
+                `observation_cls`; declare a distinct model when reset differs.
+            max_concurrent_envs (`int`, *optional*):
+                Maximum number of concurrent WebSocket sessions. Mutually exclusive with
+                `concurrency_config`.
+            concurrency_config (`ConcurrencyConfig`, *optional*):
+                Advanced concurrency settings. Mutually exclusive with
+                `max_concurrent_envs`.
+            env_name (`str`, *optional*):
+                Public environment name used by task/split endpoints.
+            state_cls (`Type[State]`, *optional*, defaults to `State`):
+                The `State` subclass this environment reports. Used for the `/state`
+                response model and the `state` entry of `/schema`, so that fields
+                declared by the subclass are published and serialized.
 
         Raises:
-            ValueError: If both max_concurrent_envs and concurrency_config are provided.
-            ConcurrencyConfigurationError: If max_concurrent_envs > 1 for an
-                environment that is not marked as SUPPORTS_CONCURRENT_SESSIONS.
+            `ValueError`: If both `max_concurrent_envs` and `concurrency_config` are provided.
+            `ConcurrencyConfigurationError`: If `max_concurrent_envs` > 1 for an environment
+                that is not marked as `SUPPORTS_CONCURRENT_SESSIONS`.
         """
         # Validate that env is callable
         if not callable(env):
@@ -206,12 +251,17 @@ class HTTPEnvServer:
 
         self.action_cls = action_cls
         self.observation_cls = observation_cls
+        self.reset_observation_cls = reset_observation_cls or observation_cls
+        self.state_cls = state_cls
+        self.env_name = env_name or self._default_env_name()
 
         # Session management for WebSocket connections
         self._sessions: Dict[str, Optional[Environment]] = {}
         self._session_executors: Dict[str, ThreadPoolExecutor] = {}
         self._session_stacks: Dict[str, AsyncExitStack] = {}
         self._session_info: Dict[str, SessionInfo] = {}
+        self._session_websocket_attachments: set[str] = set()
+        self._session_pending_closes: set[str] = set()
         self._session_lock = asyncio.Lock()
 
         # Create thread pool for running sync code in async context
@@ -231,13 +281,19 @@ class HTTPEnvServer:
         )
         self._reaper_task: Optional[asyncio.Task[None]] = None
 
+    def _default_env_name(self) -> str:
+        factory = self._env_factory
+        if inspect.isclass(factory):
+            return factory.__name__
+        return getattr(factory, "__name__", "environment")
+
     def _validate_concurrency_safety(self) -> None:
         """
         Validate that the environment supports the configured concurrency level.
 
         Raises:
-            ConcurrencyConfigurationError: If max_concurrent_envs > 1 for an
-                environment that is not marked as SUPPORTS_CONCURRENT_SESSIONS.
+            `ConcurrencyConfigurationError`: If `max_concurrent_envs` > 1 for an environment
+                that is not marked as `SUPPORTS_CONCURRENT_SESSIONS`.
         """
         import functools
 
@@ -277,7 +333,7 @@ class HTTPEnvServer:
         Get the current capacity status of the server.
 
         Returns:
-            ServerCapacityStatus with current session counts and availability.
+            [`ServerCapacityStatus`] with current session counts and availability.
         """
         return ServerCapacityStatus.from_counts(
             active=len(self._sessions),
@@ -319,11 +375,11 @@ class HTTPEnvServer:
         Create a new WebSocket session with its own environment instance.
 
         Returns:
-            Tuple of (session_id, environment)
+            `tuple[str, Environment]`: Tuple of (session_id, environment).
 
         Raises:
-            SessionCapacityError: If max concurrent sessions reached
-            EnvironmentFactoryError: If the factory fails to create an environment
+            `SessionCapacityError`: If max concurrent sessions reached.
+            `EnvironmentFactoryError`: If the factory fails to create an environment.
         """
         async with self._session_lock:
             if len(self._sessions) >= self._max_concurrent_envs:
@@ -401,13 +457,16 @@ class HTTPEnvServer:
         Destroy a WebSocket session and cleanup resources.
 
         Args:
-            session_id: The session ID to destroy
+            session_id (`str`):
+                The session ID to destroy.
         """
         async with self._session_lock:
             env = self._sessions.pop(session_id, None)
             executor = self._session_executors.pop(session_id, None)
             stack = self._session_stacks.pop(session_id, None)
             self._session_info.pop(session_id, None)
+            self._session_websocket_attachments.discard(session_id)
+            self._session_pending_closes.discard(session_id)
 
         await self._cleanup_session_resources(env, executor, stack)
 
@@ -456,8 +515,10 @@ class HTTPEnvServer:
         Update session activity timestamp and optionally increment step count.
 
         Args:
-            session_id: The session ID to update
-            increment_step: If True, increment the step count
+            session_id (`str`):
+                The session ID to update.
+            increment_step (`bool`, *optional*, defaults to `False`):
+                If `True`, increment the step count.
         """
         if session_id in self._session_info:
             self._session_info[session_id].last_activity_at = time.time()
@@ -477,7 +538,10 @@ class HTTPEnvServer:
                 stale_ids: list[str] = []
                 async with self._session_lock:
                     for sid, info in self._session_info.items():
-                        if now - info.last_activity_at > timeout:
+                        if (
+                            sid not in self._session_websocket_attachments
+                            and now - info.last_activity_at > timeout
+                        ):
                             stale_ids.append(sid)
                 for sid in stale_ids:
                     # Re-check under lock: activity may have arrived since
@@ -487,7 +551,11 @@ class HTTPEnvServer:
                     now = time.time()
                     async with self._session_lock:
                         info = self._session_info.get(sid)
-                        if info is None or (now - info.last_activity_at) <= timeout:
+                        if (
+                            info is None
+                            or sid in self._session_websocket_attachments
+                            or (now - info.last_activity_at) <= timeout
+                        ):
                             continue
                     await self._destroy_session(sid)
             except asyncio.CancelledError:
@@ -514,10 +582,11 @@ class HTTPEnvServer:
         Get information about a specific session.
 
         Args:
-            session_id: The session ID to query
+            session_id (`str`):
+                The session ID to query.
 
         Returns:
-            SessionInfo if the session exists, None otherwise
+            [`SessionInfo`] if the session exists, `None` otherwise.
         """
         return self._session_info.get(session_id)
 
@@ -528,6 +597,25 @@ class HTTPEnvServer:
         executor = self._session_executors.get(session_id, self._executor)
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+
+    async def _run_mcp_client_operation(
+        self,
+        mcp_client: Any,
+        mcp_session_factory: Any,
+        managed_session_id: Optional[str],
+        operation: Callable[[], Awaitable[_MCPResult]],
+    ) -> _MCPResult:
+        """Run an MCP client operation with the appropriate transport lifecycle."""
+        if managed_session_id and mcp_client.is_connected():
+            return await operation()
+
+        if callable(mcp_session_factory):
+            mcp_session_cm = cast(AsyncContextManager[Any], mcp_session_factory())
+            async with mcp_session_cm:
+                return await operation()
+
+        async with mcp_client:
+            return await operation()
 
     @property
     def active_sessions(self) -> int:
@@ -558,6 +646,212 @@ class HTTPEnvServer:
         """Return the concurrency configuration."""
         return self._concurrency_config
 
+    def _factory_produces_harness_env(self) -> bool:
+        """Return whether the env factory produces a HarnessEnvironment."""
+        import inspect
+
+        # Lazy import: openenv.core.harness imports env_server modules, so a
+        # top-level import here would be circular.
+        from ..harness.environment import HarnessEnvironment
+
+        if inspect.isclass(self._env_factory):
+            return issubclass(self._env_factory, HarnessEnvironment)
+        _temp_env = self._env_factory()
+        try:
+            return isinstance(_temp_env, HarnessEnvironment)
+        finally:
+            _temp_env.close()
+
+    def _register_harness_route(self, app: FastAPI) -> None:
+        """
+        Register the production `/harness` WebSocket route (RFC 005).
+
+        Each connection gets its own environment session: connecting resets
+        the environment (which starts the harness process and injects tools),
+        and each `{"type": "message", "content": ...}` frame runs one
+        conversational turn, streamed back as `HarnessEvent` JSON frames
+        ending with a `turn_complete` event. Malformed client frames receive a
+        recoverable `protocol_error` response without starting a turn; the
+        connection remains usable. Terminal failures use `error`.
+        """
+        # Lazy import to avoid a circular import with openenv.core.harness.
+        from ..harness.adapter import HarnessNotRunningError
+        from ..harness.events import (
+            HarnessClientMessage,
+            HarnessEvent,
+            HarnessEventType,
+            HarnessProtocolError,
+        )
+
+        @app.websocket("/harness")
+        async def harness_websocket_endpoint(websocket: WebSocket):
+            await websocket.accept()
+
+            session_id = None
+            session_env = None
+
+            async def send_error(message: str, code: WSErrorCode) -> None:
+                error_response = WSErrorResponse(
+                    data={"message": message, "code": code}
+                )
+                await websocket.send_text(error_response.model_dump_json())
+
+            async def send_protocol_error(message: str, code: WSErrorCode) -> None:
+                error_response = HarnessProtocolError(
+                    data={"message": message, "code": code}
+                )
+                await websocket.send_text(error_response.model_dump_json())
+
+            async def send_harness_error(message: str) -> None:
+                """Emit a terminal ERROR event in the harness event stream."""
+                error_event = HarnessEvent(
+                    type=HarnessEventType.ERROR,
+                    data={"message": message, "recoverable": False},
+                )
+                await websocket.send_text(error_event.model_dump_json())
+
+            try:
+                session_id, session_env = await self._create_session()
+                # Protect the live harness from idle reaping and HTTP session
+                # close, including startup and turns that emit no events.
+                self._session_websocket_attachments.add(session_id)
+
+                async with AsyncExitStack() as stack:
+                    mcp_session_factory = getattr(session_env, "mcp_session", None)
+                    if callable(mcp_session_factory):
+                        mcp_session_cm = cast(
+                            AsyncContextManager[Any], mcp_session_factory()
+                        )
+                        await stack.enter_async_context(mcp_session_cm)
+
+                    # Starts the harness process and injects environment tools
+                    await session_env.reset_async()
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "session_started",
+                                "data": {
+                                    "session_id": session_id,
+                                    "harness": session_env.adapter.config.name,
+                                },
+                            }
+                        )
+                    )
+
+                    while True:
+                        raw_message = await websocket.receive_text()
+
+                        try:
+                            message_dict = json.loads(raw_message)
+                        except json.JSONDecodeError as e:
+                            await send_protocol_error(
+                                f"Invalid JSON: {e}", WSErrorCode.INVALID_JSON
+                            )
+                            continue
+                        try:
+                            client_message = HarnessClientMessage(**message_dict)
+                        except (ValidationError, TypeError) as e:
+                            await send_protocol_error(
+                                f"Invalid message: {e}",
+                                WSErrorCode.VALIDATION_ERROR,
+                            )
+                            continue
+
+                        self._update_session_activity(session_id, increment_step=True)
+
+                        async def stream_turn(content: str) -> bool:
+                            """Stream one turn; True if it ended with TURN_COMPLETE."""
+                            saw_terminal = False
+                            adapter = session_env.adapter
+                            if not await adapter.is_alive():
+                                raise HarnessNotRunningError(
+                                    "harness process is not running"
+                                )
+                            async for event in adapter.send_message_streaming(content):
+                                await websocket.send_text(event.model_dump_json())
+                                # Record progress throughout the turn.
+                                self._update_session_activity(session_id)
+                                saw_terminal = (
+                                    event.type is HarnessEventType.TURN_COMPLETE
+                                )
+                            return saw_terminal
+
+                        # Bound the turn in wall-clock time, matching what
+                        # simulation mode does in HarnessEnvironment._run_turn.
+                        # Without this a hung harness holds the session open
+                        # forever, and the server sits at capacity.
+                        turn_timeout_s = session_env.adapter.config.session_timeout_s
+                        try:
+                            completed = await asyncio.wait_for(
+                                stream_turn(client_message.content),
+                                turn_timeout_s,
+                            )
+                        except asyncio.TimeoutError:
+                            await send_harness_error(
+                                f"harness turn exceeded {turn_timeout_s} seconds"
+                            )
+                            break
+                        except HarnessNotRunningError:
+                            await send_harness_error("harness process is not running")
+                            break
+                        except Exception:
+                            # Harness state after a crash is undefined; end
+                            # the session so a reconnect gets a fresh one.
+                            # Adapter exceptions can contain credentials or
+                            # subprocess output; do not expose them to clients.
+                            await send_harness_error("harness turn failed")
+                            break
+
+                        if not completed:
+                            # send_message() raises HarnessError here; the
+                            # socket equivalent is to say so and end the
+                            # session, rather than leaving a client that
+                            # blocks on the terminal event waiting forever.
+                            await send_harness_error(
+                                "harness event stream ended without a "
+                                "TURN_COMPLETE event"
+                            )
+                            break
+
+            except WebSocketDisconnect:
+                pass
+            except SessionCapacityError as e:
+                await send_error(str(e), WSErrorCode.CAPACITY_REACHED)
+            except EnvironmentFactoryError as e:
+                await send_error(str(e), WSErrorCode.FACTORY_ERROR)
+            except Exception:
+                try:
+                    await send_error(
+                        "harness session failed", WSErrorCode.SESSION_ERROR
+                    )
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
+            finally:
+                if session_id:
+                    # Release ownership without an await so cancellation cannot
+                    # leave a session permanently exempt from idle reaping.
+                    self._session_websocket_attachments.discard(session_id)
+                    cleanup = asyncio.create_task(self._destroy_session(session_id))
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # ASGI cancellation must not orphan a running harness.
+                        # Finish teardown before propagating cancellation, even
+                        # when the request's cancel scope cancels us repeatedly.
+                        while not cleanup.done():
+                            try:
+                                await asyncio.shield(cleanup)
+                            except asyncio.CancelledError:
+                                pass
+                        cleanup.result()
+                        raise
+                try:
+                    await websocket.close()
+                except (RuntimeError, WebSocketDisconnect):
+                    # TestClient raises RuntimeError, real ASGI servers raise
+                    # WebSocketDisconnect when the client is already gone.
+                    pass
+
     def register_routes(
         self, app: FastAPI, mode: ServerMode | str = ServerMode.SIMULATION
     ) -> None:
@@ -565,14 +859,15 @@ class HTTPEnvServer:
         Register HTTP routes on a FastAPI application.
 
         Args:
-            app: FastAPI application instance
-            mode: Server mode - either SIMULATION or PRODUCTION (or string equivalents).
-                  In production mode, simulation control endpoints (/reset, /step, /state)
-                  are NOT registered. Only safe endpoints (/health, /schema, /metadata, /ws)
-                  are available. Defaults to SIMULATION for backwards compatibility.
+            app (`FastAPI`):
+                FastAPI application instance.
+            mode (`ServerMode` or `str`, *optional*, defaults to `ServerMode.SIMULATION`):
+                Server mode. In production mode, simulation control endpoints (/reset, /step,
+                /state) are NOT registered. Only safe endpoints (/health, /schema, /metadata,
+                /ws) are available.
 
         Raises:
-            ValueError: If mode is not a valid ServerMode or string equivalent.
+            `ValueError`: If `mode` is not a valid `ServerMode` or string equivalent.
         """
         # Convert string to ServerMode enum for backwards compatibility
         if isinstance(mode, str):
@@ -610,7 +905,7 @@ class HTTPEnvServer:
             try:
                 kwargs = request.model_dump(exclude_unset=True)
 
-                is_async = _env.reset_async.__func__ is not Environment.reset_async
+                is_async = overrides_method(_env.reset_async, Environment.reset_async)
 
                 if is_async:
                     sig = inspect.signature(_env.reset_async)
@@ -645,7 +940,7 @@ class HTTPEnvServer:
             try:
                 kwargs = request.model_dump(exclude_unset=True, exclude={"action"})
 
-                is_async = _env.step_async.__func__ is not Environment.step_async
+                is_async = overrides_method(_env.step_async, Environment.step_async)
 
                 if is_async:
                     sig = inspect.signature(_env.step_async)
@@ -676,9 +971,8 @@ class HTTPEnvServer:
             Handle MCP JSON-RPC requests.
 
             Supports tools/list and tools/call methods in JSON-RPC 2.0 format,
-            plus OpenEnv session lifecycle methods for HTTP MCP:
-            - openenv/session/create
-            - openenv/session/close
+            plus OpenEnv session lifecycle methods for HTTP MCP (openenv/session/create,
+            openenv/session/close).
             """
             method = request.method
             request_id = request.id
@@ -739,14 +1033,32 @@ class HTTPEnvServer:
                     )
 
                 async with self._session_lock:
-                    env = self._sessions.pop(target_session_id, _MISSING)
-                    if env is not _MISSING:
+                    if target_session_id in self._session_websocket_attachments:
+                        env = _MISSING
+                        attached = True
+                        self._session_pending_closes.add(target_session_id)
+                        executor = None
+                        stack = None
+                    else:
+                        attached = False
+                        env = self._sessions.pop(target_session_id, _MISSING)
+                    if not attached and env is not _MISSING:
                         executor = self._session_executors.pop(target_session_id, None)
                         stack = self._session_stacks.pop(target_session_id, None)
                         self._session_info.pop(target_session_id, None)
-                    else:
+                    elif not attached:
                         executor = None
                         stack = None
+
+                if attached:
+                    return JsonRpcResponse.success(
+                        result={
+                            "session_id": target_session_id,
+                            "closed": False,
+                            "closing": True,
+                        },
+                        request_id=request_id,
+                    )
 
                 if env is _MISSING:
                     return JsonRpcResponse.error_response(
@@ -812,9 +1124,45 @@ class HTTPEnvServer:
                 mcp_server = getattr(_env, "mcp_server", None)
                 mcp_session_factory = getattr(_env, "mcp_session", None)
 
+                async def call_mcp_style_step(action: Action) -> Observation:
+                    is_async = overrides_method(_env.step_async, Environment.step_async)
+                    if is_async:
+                        return await _env.step_async(action)
+                    if managed_session_id:
+                        return await self._run_in_session_executor(
+                            managed_session_id,
+                            _env.step,
+                            action,
+                        )
+                    return await self._run_sync_in_thread_pool(_env.step, action)
+
+                supports_mcp_style_actions = self.action_cls in {
+                    CallToolAction,
+                    ListToolsAction,
+                }
+
                 if method == McpMethod.TOOLS_LIST:
                     # Check if environment is MCP-enabled
                     if mcp_client is None and mcp_server is None:
+                        if supports_mcp_style_actions:
+                            observation = await call_mcp_style_step(ListToolsAction())
+                            if isinstance(observation, ListToolsObservation):
+                                return JsonRpcResponse.success(
+                                    result={
+                                        "tools": [
+                                            tool.model_dump()
+                                            for tool in observation.tools
+                                        ]
+                                    },
+                                    request_id=request_id,
+                                )
+                            return JsonRpcResponse.error_response(
+                                JsonRpcErrorCode.INTERNAL_ERROR,
+                                "MCP-style tools/list step returned "
+                                f"{type(observation).__name__}, expected "
+                                "ListToolsObservation",
+                                request_id=request_id,
+                            )
                         return JsonRpcResponse.error_response(
                             JsonRpcErrorCode.INTERNAL_ERROR,
                             "Environment does not support MCP",
@@ -822,21 +1170,12 @@ class HTTPEnvServer:
                         )
 
                     if mcp_client:
-                        if managed_session_id and mcp_client.is_connected():
-                            # Session-managed with live transport — call
-                            # directly, no redundant re-entry.
-                            tools = await mcp_client.list_tools()
-                        elif callable(mcp_session_factory):
-                            # Stateless request, or session-managed but the
-                            # background transport was lost: (re-)open.
-                            mcp_session_cm = cast(
-                                AsyncContextManager[Any], mcp_session_factory()
-                            )
-                            async with mcp_session_cm:
-                                tools = await mcp_client.list_tools()
-                        else:
-                            async with mcp_client:
-                                tools = await mcp_client.list_tools()
+                        tools = await self._run_mcp_client_operation(
+                            mcp_client,
+                            mcp_session_factory,
+                            managed_session_id,
+                            mcp_client.list_tools,
+                        )
 
                         return JsonRpcResponse.success(
                             result={
@@ -875,13 +1214,6 @@ class HTTPEnvServer:
                     tool_name = params.get("name")
                     arguments = params.get("arguments", {})
 
-                    if mcp_client is None and mcp_server is None:
-                        return JsonRpcResponse.error_response(
-                            JsonRpcErrorCode.INTERNAL_ERROR,
-                            "Environment does not support MCP",
-                            request_id=request_id,
-                        )
-
                     if not tool_name:
                         return JsonRpcResponse.error_response(
                             JsonRpcErrorCode.INVALID_PARAMS,
@@ -889,27 +1221,41 @@ class HTTPEnvServer:
                             request_id=request_id,
                         )
 
+                    if mcp_client is None and mcp_server is None:
+                        if supports_mcp_style_actions:
+                            observation = await call_mcp_style_step(
+                                CallToolAction(
+                                    tool_name=tool_name,
+                                    arguments=arguments,
+                                )
+                            )
+                            if isinstance(observation, CallToolObservation):
+                                return JsonRpcResponse.success(
+                                    result=_make_json_serializable(observation),
+                                    request_id=request_id,
+                                )
+                            return JsonRpcResponse.error_response(
+                                JsonRpcErrorCode.INTERNAL_ERROR,
+                                "MCP-style tools/call step returned "
+                                f"{type(observation).__name__}, expected "
+                                "CallToolObservation",
+                                request_id=request_id,
+                            )
+                        return JsonRpcResponse.error_response(
+                            JsonRpcErrorCode.INTERNAL_ERROR,
+                            "Environment does not support MCP",
+                            request_id=request_id,
+                        )
+
                     if mcp_client:
-                        if managed_session_id and mcp_client.is_connected():
-                            # Session-managed with live transport.
-                            result = await mcp_client.call_tool(
+                        result = await self._run_mcp_client_operation(
+                            mcp_client,
+                            mcp_session_factory,
+                            managed_session_id,
+                            lambda: mcp_client.call_tool(
                                 name=tool_name, arguments=arguments
-                            )
-                        elif callable(mcp_session_factory):
-                            # Stateless request, or session-managed but the
-                            # background transport was lost: (re-)open.
-                            mcp_session_cm = cast(
-                                AsyncContextManager[Any], mcp_session_factory()
-                            )
-                            async with mcp_session_cm:
-                                result = await mcp_client.call_tool(
-                                    name=tool_name, arguments=arguments
-                                )
-                        else:
-                            async with mcp_client:
-                                result = await mcp_client.call_tool(
-                                    name=tool_name, arguments=arguments
-                                )
+                            ),
+                        )
                     elif mcp_server:
                         server_tools = get_server_tools(mcp_server)
                         if tool_name in server_tools:
@@ -961,6 +1307,96 @@ class HTTPEnvServer:
                 if should_close:
                     _env.close()
 
+        def _check_env_name(env_name: str) -> None:
+            if env_name.lower() != self.env_name.lower():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"unknown environment {env_name!r}",
+                )
+
+        def _normalize_split(split: Any) -> Dict[str, Any]:
+            if hasattr(split, "model_dump"):
+                return cast(Dict[str, Any], split.model_dump())
+            if isinstance(split, dict):
+                return _make_json_serializable(split)
+            if isinstance(split, str):
+                split_type = (
+                    split if split in {"train", "validation", "test"} else "validation"
+                )
+                return {"name": split, "type": split_type}
+            return {"name": str(split), "type": "validation"}
+
+        async def _call_task_method(method_name: str, *args: Any) -> Any:
+            _env = self._env_factory()
+            try:
+                method = getattr(_env, method_name, None)
+                if not callable(method):
+                    raise NotImplementedError
+                return await _maybe_await(method(*args))
+            except NotImplementedError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail=f"{method_name} is not supported for this environment",
+                ) from e
+            except IndexError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid task index",
+                ) from e
+            finally:
+                _env.close()
+
+        @app.get("/list_environments", tags=["Task API"])
+        async def list_environments() -> list[str]:
+            return [self.env_name]
+
+        @app.get("/{env_name}/splits", tags=["Task API"])
+        async def list_splits(env_name: str) -> list[Dict[str, Any]]:
+            _check_env_name(env_name)
+            splits = await _call_task_method("list_splits")
+            return [_normalize_split(split) for split in splits]
+
+        @app.post("/{env_name}/tasks", tags=["Task API"])
+        async def list_tasks(
+            env_name: str,
+            request: ListTasksRequest,
+        ) -> Dict[str, Any]:
+            _check_env_name(env_name)
+            tasks = await _call_task_method("list_tasks", request.split)
+            return {
+                "tasks": _make_json_serializable(tasks),
+                "env_name": self.env_name,
+            }
+
+        @app.post("/{env_name}/num_tasks", tags=["Task API"])
+        async def num_tasks(
+            env_name: str,
+            request: NumTasksRequest,
+        ) -> Dict[str, Any]:
+            _check_env_name(env_name)
+            count = await _call_task_method("num_tasks", request.split)
+            return {"num_tasks": count}
+
+        @app.post("/{env_name}/task", tags=["Task API"])
+        async def get_task(
+            env_name: str,
+            request: GetTaskRequest,
+        ) -> Dict[str, Any]:
+            _check_env_name(env_name)
+            task = await _call_task_method("get_task", request.split, request.index)
+            return {"task": _make_json_serializable(task)}
+
+        @app.post("/{env_name}/task_range", tags=["Task API"])
+        async def get_task_range(
+            env_name: str,
+            request: GetTaskRangeRequest,
+        ) -> Dict[str, Any]:
+            _check_env_name(env_name)
+            tasks = await _call_task_method(
+                "get_task_range", request.split, request.start, request.stop
+            )
+            return {"tasks": _make_json_serializable(tasks)}
+
         # Register MCP WebSocket endpoint (available in both production and simulation modes)
         @app.websocket("/mcp")
         async def mcp_websocket_endpoint(websocket: WebSocket):
@@ -968,10 +1404,8 @@ class HTTPEnvServer:
             WebSocket endpoint for MCP JSON-RPC requests.
 
             Each WebSocket connection gets its own environment instance for MCP operations.
-
-            Message Protocol:
-            - Client sends: JSON-RPC 2.0 request (tools/list, tools/call)
-            - Server responds: JSON-RPC 2.0 response (result or error)
+            The client sends JSON-RPC 2.0 requests (tools/list, tools/call) and the server
+            responds with JSON-RPC 2.0 responses (result or error).
             """
             await websocket.accept()
 
@@ -1065,8 +1499,13 @@ class HTTPEnvServer:
                     await self._destroy_session(session_id)
                 try:
                     await websocket.close()
-                except RuntimeError:
+                except (RuntimeError, WebSocketDisconnect):
                     pass
+
+        # In production mode, a harness environment is exposed directly to
+        # clients via a streaming WebSocket (RFC 005).
+        if mode == ServerMode.PRODUCTION and self._factory_produces_harness_env():
+            self._register_harness_route(app)
 
         # Register simulation control routes only in simulation mode
         if mode == ServerMode.SIMULATION:
@@ -1202,7 +1641,7 @@ version, author, and documentation links.
                 GetEndpointConfig(
                     path="/state",
                     handler=get_state_handler,
-                    response_model=State,
+                    response_model=self.state_cls,
                     tag="State Management",
                     summary="Get current environment state",
                     description="""
@@ -1226,7 +1665,8 @@ Get JSON schemas for actions, observations, and state in a single response.
 
 Returns a combined schema object containing:
 - **action**: JSON schema for actions accepted by this environment
-- **observation**: JSON schema for observations returned by this environment
+- **observation**: JSON schema for observations returned by step
+- **reset_observation**: JSON schema for observations returned by reset
 - **state**: JSON schema for environment state objects
 
 This is more efficient than calling individual schema endpoints and provides
@@ -1261,14 +1701,14 @@ all schema information needed to interact with the environment.
             return SchemaResponse(
                 action=self.action_cls.model_json_schema(),
                 observation=self.observation_cls.model_json_schema(),
-                state=State.model_json_schema(),
+                reset_observation=self.reset_observation_cls.model_json_schema(),
+                state=self.state_cls.model_json_schema(),
             )
 
         # Register MCP endpoint for production mode (direct MCP access)
         @app.post("/mcp")
         async def mcp_endpoint(request_raw: Request) -> Dict[str, Any]:
-            """
-            MCP JSON-RPC endpoint for production mode.
+            """MCP JSON-RPC endpoint for production mode.
 
             Bypasses step() overhead and provides direct access to MCP tools.
             Supports tools/list and tools/call methods.
@@ -1301,20 +1741,48 @@ all schema information needed to interact with the environment.
             """
             WebSocket endpoint for persistent environment sessions.
 
-            Each WebSocket connection gets its own environment instance.
-
-            Message Protocol:
-            - Client sends: WSResetMessage | WSStepMessage | WSStateMessage | WSCloseMessage
-            - Server responds: WSObservationResponse | WSStateResponse | WSErrorResponse
+            By default, each WebSocket connection gets its own environment instance.
+            A client can instead attach to an existing HTTP MCP session by passing its
+            session ID in the query string. The client sends WSResetMessage,
+            WSStepMessage, WSStateMessage, or WSCloseMessage; the server responds with
+            WSObservationResponse, WSStateResponse, or WSErrorResponse.
             """
             await websocket.accept()
 
             session_id = None
             session_env = None
+            owns_session = False
+            attached_session = False
 
             try:
-                # Create session with dedicated environment
-                session_id, session_env = await self._create_session()
+                requested_session_id = websocket.query_params.get("session_id")
+                if requested_session_id:
+                    async with self._session_lock:
+                        attached_env = self._sessions.get(
+                            requested_session_id, _MISSING
+                        )
+                        if attached_env is _MISSING:
+                            raise RuntimeError(
+                                f"Unknown session_id: {requested_session_id}"
+                            )
+                        if attached_env is None:
+                            raise RuntimeError(
+                                f"Session {requested_session_id} is still initializing"
+                            )
+                        if requested_session_id in self._session_websocket_attachments:
+                            raise RuntimeError(
+                                f"Session {requested_session_id} already has "
+                                "an attached WebSocket"
+                            )
+                        self._session_websocket_attachments.add(requested_session_id)
+                        session_id = requested_session_id
+                        session_env = attached_env
+                        attached_session = True
+                    self._update_session_activity(session_id)
+                else:
+                    session_id, session_env = await self._create_session()
+                    owns_session = True
+
                 if session_env is None:
                     raise RuntimeError(
                         "Session environment not initialized for websocket"
@@ -1325,7 +1793,7 @@ all schema information needed to interact with the environment.
 
                 async with AsyncExitStack() as stack:
                     mcp_session_factory = getattr(session_env, "mcp_session", None)
-                    if callable(mcp_session_factory):
+                    if owns_session and callable(mcp_session_factory):
                         mcp_session_cm = cast(
                             AsyncContextManager[Any], mcp_session_factory()
                         )
@@ -1354,9 +1822,9 @@ all schema information needed to interact with the environment.
                                 case "reset":
                                     msg = WSResetMessage(**message_dict)
 
-                                    is_async = (
-                                        session_env.reset_async.__func__
-                                        is not Environment.reset_async
+                                    is_async = overrides_method(
+                                        session_env.reset_async,
+                                        Environment.reset_async,
                                     )
 
                                     if is_async:
@@ -1392,9 +1860,9 @@ all schema information needed to interact with the environment.
                                         msg.data, self.action_cls
                                     )
 
-                                    is_async = (
-                                        session_env.step_async.__func__
-                                        is not Environment.step_async
+                                    is_async = overrides_method(
+                                        session_env.step_async,
+                                        Environment.step_async,
                                     )
 
                                     if is_async:
@@ -1504,11 +1972,18 @@ all schema information needed to interact with the environment.
                 )
                 await websocket.send_text(error_resp.model_dump_json())
             finally:
-                if session_id:
+                if attached_session and session_id:
+                    # Do not await the lock before releasing ownership: a task
+                    # cancelled while waiting would leave this session
+                    # permanently exempt from idle reaping.
+                    self._session_websocket_attachments.discard(session_id)
+                    if session_id in self._session_pending_closes:
+                        await asyncio.shield(self._destroy_session(session_id))
+                elif owns_session and session_id:
                     await self._destroy_session(session_id)
                 try:
                     await websocket.close()
-                except RuntimeError:
+                except (RuntimeError, WebSocketDisconnect):
                     pass
 
 
@@ -1524,6 +1999,10 @@ def create_app(
     custom_tab_primary: bool = False,
     show_default_tab: bool = True,
     title_override: Optional[str] = None,
+    state_cls: Type[State] = State,
+    *,
+    mode: Optional[ServerMode | str] = None,
+    reset_observation_cls: Optional[Type[Observation]] = None,
 ) -> FastAPI:
     """
     Create a FastAPI application with or without web interface.
@@ -1532,31 +2011,48 @@ def create_app(
     including README integration for better user experience.
 
     Args:
-        env: Environment factory (callable) that creates new instances
-        action_cls: The Action subclass this environment expects
-        observation_cls: The Observation subclass this environment returns
-        env_name: Optional environment name for README loading
-        max_concurrent_envs: Maximum concurrent WebSocket sessions.
-                             Mutually exclusive with concurrency_config.
-        concurrency_config: Optional ConcurrencyConfig for advanced concurrency settings.
-                            Mutually exclusive with max_concurrent_envs.
-        gradio_builder: Optional callable to build a custom Gradio UI at /web.
-            Signature: (web_manager, action_fields, metadata, is_chat_env, title,
-            quick_start_md) -> gr.Blocks. When None, the default Gradio app is used.
-            See docs/customizing-web-ui.md.
-        custom_tab_name: Label for the env-specific tab when ``gradio_builder``
-            is provided. Defaults to ``"Custom"``.
-        custom_tab_primary: When True, the env-specific tab is active first; the
-            auto-generated Playground becomes secondary. Use when the custom tab
-            is the real interaction surface for the env.
-        show_default_tab: When False, mount the env's ``gradio_builder`` output
-            alone (no auto-generated Playground, no tab chrome). Only meaningful
-            when ``gradio_builder`` is provided.
-        title_override: If set, used as the Gradio app title instead of the
-            default ``"OpenEnv Agentic Environment: {name}"``.
+        env (`Callable[[], Environment]`):
+            Environment factory (callable) that creates new instances.
+        action_cls (`Type[Action]`):
+            The Action subclass this environment expects.
+        observation_cls (`Type[Observation]`):
+            The Observation subclass returned by step.
+        reset_observation_cls (`Type[Observation]`, *optional*):
+            The reset observation model published in `/schema`. Defaults to
+            `observation_cls`; declare a distinct model when reset differs.
+        env_name (`str`, *optional*):
+            Environment name for README loading.
+        max_concurrent_envs (`int`, *optional*):
+            Maximum concurrent WebSocket sessions. Mutually exclusive with
+            `concurrency_config`.
+        concurrency_config (`ConcurrencyConfig`, *optional*):
+            Advanced concurrency settings. Mutually exclusive with
+            `max_concurrent_envs`.
+        gradio_builder (`Callable`, *optional*):
+            Callable to build a custom Gradio UI at /web. Signature:
+            `(web_manager, action_fields, metadata, is_chat_env, title, quick_start_md) -> gr.Blocks`.
+            When `None`, the default Gradio app is used.
+        custom_tab_name (`str`, *optional*, defaults to `"Custom"`):
+            Label for the env-specific tab when `gradio_builder` is provided.
+        custom_tab_primary (`bool`, *optional*, defaults to `False`):
+            When `True`, the env-specific tab is active first; the auto-generated
+            Playground becomes secondary.
+        show_default_tab (`bool`, *optional*, defaults to `True`):
+            When `False`, mount the env's `gradio_builder` output alone (no
+            auto-generated Playground, no tab chrome). Only meaningful when
+            `gradio_builder` is provided.
+        title_override (`str`, *optional*):
+            If set, used as the Gradio app title instead of the default
+            `"OpenEnv Agentic Environment: {name}"`.
+        state_cls (`Type[State]`, *optional*, defaults to `State`):
+            The `State` subclass this environment reports, used for the `/state`
+            response model and the `state` entry of `/schema`.
+        mode (`ServerMode` or `str`, *optional*):
+            Server mode. When `None`, resolved from the `OPENENV_MODE`
+            environment variable, defaulting to simulation.
 
     Returns:
-        FastAPI application instance with or without web interface and README integration
+        `FastAPI` application instance with or without web interface and README integration.
     """
     # Check if web interface should be enabled
     # This can be controlled via environment variable or build argument
@@ -1577,16 +2073,27 @@ def create_app(
             env_name,
             max_concurrent_envs,
             concurrency_config,
+            state_cls=state_cls,
+            reset_observation_cls=reset_observation_cls,
             gradio_builder=gradio_builder,
             custom_tab_name=custom_tab_name,
             custom_tab_primary=custom_tab_primary,
             show_default_tab=show_default_tab,
             title_override=title_override,
+            mode=mode,
         )
     else:
         # Use standard FastAPI app without web interface
         return create_fastapi_app(
-            env, action_cls, observation_cls, max_concurrent_envs, concurrency_config
+            env,
+            action_cls,
+            observation_cls,
+            max_concurrent_envs,
+            concurrency_config,
+            env_name=env_name,
+            state_cls=state_cls,
+            reset_observation_cls=reset_observation_cls,
+            mode=mode,
         )
 
 
@@ -1596,21 +2103,42 @@ def create_fastapi_app(
     observation_cls: Type[Observation],
     max_concurrent_envs: Optional[int] = None,
     concurrency_config: Optional[ConcurrencyConfig] = None,
+    env_name: Optional[str] = None,
+    state_cls: Type[State] = State,
+    *,
+    mode: Optional[ServerMode | str] = None,
+    reset_observation_cls: Optional[Type[Observation]] = None,
 ) -> FastAPI:
     """
     Create a FastAPI application with comprehensive documentation.
 
     Args:
-        env: Environment factory (callable) that creates new instances
-        action_cls: The Action subclass this environment expects
-        observation_cls: The Observation subclass this environment returns
-        max_concurrent_envs: Maximum concurrent WebSocket sessions.
-                             Mutually exclusive with concurrency_config.
-        concurrency_config: Optional ConcurrencyConfig for advanced concurrency settings.
-                            Mutually exclusive with max_concurrent_envs.
+        env (`Callable[[], Environment]`):
+            Environment factory (callable) that creates new instances.
+        action_cls (`Type[Action]`):
+            The Action subclass this environment expects.
+        observation_cls (`Type[Observation]`):
+            The Observation subclass returned by step.
+        reset_observation_cls (`Type[Observation]`, *optional*):
+            The reset observation model published in `/schema`. Defaults to
+            `observation_cls`; declare a distinct model when reset differs.
+        max_concurrent_envs (`int`, *optional*):
+            Maximum concurrent WebSocket sessions. Mutually exclusive with
+            `concurrency_config`.
+        concurrency_config (`ConcurrencyConfig`, *optional*):
+            Advanced concurrency settings. Mutually exclusive with
+            `max_concurrent_envs`.
+        env_name (`str`, *optional*):
+            Optional environment name for task/split endpoints.
+        state_cls (`Type[State]`, *optional*, defaults to `State`):
+            The `State` subclass this environment reports, used for the `/state`
+            response model and the `state` entry of `/schema`.
+        mode (`ServerMode` or `str`, *optional*):
+            Server mode. When `None`, resolved from the `OPENENV_MODE`
+            environment variable, defaulting to simulation.
 
     Returns:
-        FastAPI application instance
+        `FastAPI` application instance.
     """
     try:
         from fastapi import FastAPI
@@ -1671,11 +2199,11 @@ HTTP API for interacting with OpenEnv environments through a standardized interf
         openapi_url="/openapi.json",
         contact={
             "name": "OpenEnv Team",
-            "url": "https://github.com/meta-pytorch/OpenEnv",
+            "url": "https://github.com/huggingface/OpenEnv",
         },
         license_info={
             "name": "BSD-3-Clause",
-            "url": "https://github.com/meta-pytorch/OpenEnv/blob/main/LICENSE",
+            "url": "https://github.com/huggingface/OpenEnv/blob/main/LICENSE",
         },
     )
 
@@ -1685,6 +2213,11 @@ HTTP API for interacting with OpenEnv environments through a standardized interf
         observation_cls,
         max_concurrent_envs,
         concurrency_config=concurrency_config,
+        env_name=env_name,
+        state_cls=state_cls,
+        reset_observation_cls=reset_observation_cls,
     )
-    server.register_routes(app)
+    if mode is None:
+        mode = os.environ.get("OPENENV_MODE", ServerMode.SIMULATION.value)
+    server.register_routes(app, mode=mode)
     return app
