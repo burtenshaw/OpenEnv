@@ -23,7 +23,6 @@ EMPTY, BORDER, TEXT, BG = (
     (255, 255, 255),
     (250, 250, 250),
 )
-INVALID = (230, 200, 200)
 
 
 def font(size):
@@ -37,13 +36,14 @@ def font(size):
 
 def board(draw, x0, y0, game, rows_shown):
     big = font(28)
+    # Rejected submissions have no colors and do not consume a Wordle row.
+    rows = [row for row in game["rows"][:rows_shown] if row["colors"]]
     for r in range(6):
-        row = game["rows"][r] if r < rows_shown and r < len(game["rows"]) else None
+        row = rows[r] if r < len(rows) else None
         for c in range(5):
             x, y = x0 + c * (TILE + GAP), y0 + r * (TILE + GAP)
             colors = row and row["colors"]
-            # A row without feedback is a guess the game rejected (repeated word, not a word, wrong length).
-            fill = COLORS[colors[c]] if colors else INVALID if row else EMPTY
+            fill = COLORS[colors[c]] if colors else EMPTY
             draw.rectangle(
                 [x, y, x + TILE, y + TILE],
                 fill=fill,
@@ -64,18 +64,20 @@ def frames(columns, labels):
     width = 5 * TILE + 4 * GAP
     height = 6 * TILE + 5 * GAP
     W = PAD + len(columns) * (width + PAD)
-    H = 3 * PAD + 40 + height + 40
+    H = 3 * PAD + 40 + height + 70
     games = min(len(c) for c in columns)
     out = []
     for g in range(games):
-        wins = [sum(x["won"] for x in column[: g + 1]) for column in columns]
-        for shown in range(1, 7):
+        wins = [sum(x["won"] for x in column[:g]) for column in columns]
+        # One frame per submission, including invalids; preserve legacy pacing.
+        submissions = max(6, *(len(column[g]["rows"]) for column in columns))
+        for shown in range(1, submissions + 1):
             img = Image.new("RGB", (W, H), BG)
             draw = ImageDraw.Draw(img)
             for i, (column, label) in enumerate(zip(columns, labels)):
                 game, x0 = column[g], PAD + i * (width + PAD)
                 done = shown >= len(game["rows"])
-                won_so_far = wins[i] if done else wins[i] - game["won"]
+                won_so_far = wins[i] + (done and game["won"])
                 draw.text(
                     (x0 + width / 2, PAD),
                     label,
@@ -91,6 +93,18 @@ def frames(columns, labels):
                     fill=(90, 90, 90),
                 )
                 board(draw, x0, 2 * PAD + 40, game, shown)
+                visible = game["rows"][:shown]
+                if visible and not visible[-1]["colors"]:
+                    # Keep rejected input out of the board and verdict area.
+                    letters = visible[-1]["letters"]
+                    letters = letters[:13] + "..." if len(letters) > 16 else letters
+                    draw.text(
+                        (x0 + width / 2, 2 * PAD + 40 + height + 14),
+                        f"invalid: {letters}",
+                        font=font(15),
+                        anchor="mm",
+                        fill=(180, 60, 60),
+                    )
                 if done:
                     verdict = (
                         "solved"
