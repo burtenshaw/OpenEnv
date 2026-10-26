@@ -3,7 +3,7 @@
 **Status**: In Review
 **Created**: 2026-06-01
 **Authors**: @burtenshaw
-**RFC ID**: 006
+**RFC ID**: 015
 
 ## Summary
 
@@ -22,12 +22,6 @@ the design implemented in [PR #726](https://github.com/openenv/OpenEnv/pull/726)
 so the architectural decisions can be reviewed explicitly even though the code
 already exists. PR #726 merged on July 3, 2026; its merge does not mark
 this RFC as accepted. The architectural choices below remain **In Review**.
-
-The RFC number is provisional: 006 is already used by
-[Agentic RL through Harness Interception](./006-agentic-rl-harness-interception.md),
-and [PR #795](https://github.com/openenv/OpenEnv/pull/795) also claims it.
-A coordinated renumbering must update this filename, RFC ID, index entry,
-and roadmap references before this proposal can land.
 
 ---
 
