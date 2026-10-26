@@ -1,4 +1,4 @@
-# RFC 006: External Environment Imports
+# RFC: External Environment Imports
 
 **Status**: In Review
 **Created**: 2026-06-01
@@ -18,9 +18,16 @@ Verifiers. It adds `openenv import SOURCE --name NAME --output-dir DIR`, an
 importer registry, AST-based source detection, generated wrappers, optional
 task/split discovery for dataset-backed environments, and MCP-style
 `tools/list` and `tools/call` support for imported wrappers. This RFC documents
-the design implemented in [PR #726](https://github.com/huggingface/OpenEnv/pull/726)
+the design implemented in [PR #726](https://github.com/openenv/OpenEnv/pull/726)
 so the architectural decisions can be reviewed explicitly even though the code
-already exists.
+already exists. PR #726 merged on July 3, 2026; its merge does not mark
+this RFC as accepted. The architectural choices below remain **In Review**.
+
+The RFC number is provisional: 006 is already used by
+[Agentic RL through Harness Interception](./006-agentic-rl-harness-interception.md),
+and [PR #795](https://github.com/openenv/OpenEnv/pull/795) also claims it.
+A coordinated renumbering must update this filename, RFC ID, index entry,
+and roadmap references before this proposal can land.
 
 ---
 
@@ -52,9 +59,11 @@ OpenEnv needs a deterministic import process:
 ### Problem 3: Dataset-backed environments need task discovery
 
 External libraries often expose a dataset-like interface: list splits, count
-tasks, fetch one task, then run an episode for that task. OpenEnv has
-`reset()`, `step()`, and `state`, but no standardized way for orchestration to
-discover available tasks before choosing one for reset.
+tasks, fetch one task, then run an episode for that task. At the time this
+proposal was written, OpenEnv had `reset()`, `step()`, and `state`, but no
+standardized task-discovery API. The optional
+[Task API](../docs/source/guides/task-api.md) now exists on main; this RFC
+records the importer and task-discovery design for architectural review.
 
 Imported wrappers need task metadata for evaluation and demos, while preserving
 the rule that agents cannot call simulation controls or choose resets through
@@ -162,11 +171,11 @@ class DetectedEnvironment:
     module_path: str
     file_path: Path
 
+
 class EnvironmentImporter(Protocol):
     source_type: str
 
-    def detect(self, source: Path) -> list[DetectedEnvironment]:
-        ...
+    def detect(self, source: Path) -> list[DetectedEnvironment]: ...
 
     def generate(
         self,
@@ -175,8 +184,7 @@ class EnvironmentImporter(Protocol):
         destination: Path,
         env_name: str,
         detected: DetectedEnvironment,
-    ) -> None:
-        ...
+    ) -> None: ...
 ```
 
 `ImporterRegistry` owns detection and source-type selection. This keeps the CLI
@@ -225,8 +233,13 @@ Importers may append runtime dependencies to both `server/requirements.txt` and
 rather than string replacement.
 
 The ORS/OpenReward importer infers dependency roots from imports and maps known
-roots to package names such as `openreward`, `openrewardstandard`, or `ors`,
-unless the dependency is already vendored inside the source tree. The Verifiers
+roots using the mappings in
+[`ors.py`](../src/openenv/cli/importers/ors.py), including `openreward`,
+`openrewardstandard`, and `ors`, unless the dependency is already vendored
+inside the source tree. These are the implementation's import identifiers
+and dependency mappings, not a verified list of supported PyPI distributions;
+package identity and supported versions still need validation before generated
+dependencies are relied on. The Verifiers
 importer adds `verifiers>=0.1.14`.
 
 ### Generated Wrapper Contract
@@ -237,19 +250,22 @@ Generated wrappers subclass `Environment` and implement normal OpenEnv methods:
 class ImportedEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS = False
 
-    def reset(self, seed=None, episode_id=None, **kwargs) -> Observation:
-        ...
+    def reset(self, seed=None, episode_id=None, **kwargs) -> Observation: ...
 
-    def step(self, action, timeout_s=None, **kwargs) -> Observation:
-        ...
+    def step(self, action, timeout_s=None, **kwargs) -> Observation: ...
 
     @property
-    def state(self) -> State:
-        ...
+    def state(self) -> State: ...
 
-    def close(self) -> None:
-        ...
+    def close(self) -> None: ...
 ```
+
+`SUPPORTS_CONCURRENT_SESSIONS` is an existing attribute on
+[`Environment`](../src/openenv/core/env_server/interfaces.py), defaulting to
+`False`. It controls whether multiple WebSocket sessions may each receive
+a separate environment instance, subject to `max_concurrent_envs`; it does
+not multiplex trajectories within one instance. Generated wrappers retain
+the default until their session isolation is established.
 
 Wrappers must not automatically create an episode when an agent calls a tool.
 If a tool call happens before orchestration calls `reset()`, the wrapper raises
@@ -383,7 +399,7 @@ These routes are infrastructure-facing metadata routes. They must not expose
 agent actions, reset, state mutation, or reward mutation.
 
 OpenEnv is moving toward WebSocket-first environment communication. The HTTP
-routes above are accepted as a compatibility bridge for ORS-style clients during
+routes above are proposed as a compatibility bridge for ORS-style clients during
 the transition, not as a new agent-facing surface. Before 1.0, the same request
 and response models should be made available through the WebSocket
 infrastructure channel so the HTTP compatibility layer can be deprecated or
@@ -423,9 +439,7 @@ from openenv.core.env_server.mcp_types import CallToolAction, ListToolsAction
 env = RipgrepHarborEnvironment()
 obs = env.reset(split="train", index=0)
 tools = env.step(ListToolsAction())
-result = env.step(
-    CallToolAction(tool_name="answer", arguments={"value": "rg --files"})
-)
+result = env.step(CallToolAction(tool_name="answer", arguments={"value": "rg --files"}))
 ```
 
 ### Import a Verifiers Environment
@@ -604,7 +618,8 @@ translate source actions into MCP-style tools instead.
 
 ## Implementation Notes
 
-The implementation in PR #726 adds:
+[PR #726](https://github.com/openenv/OpenEnv/pull/726), merged on July 3, 2026,
+introduced the following files and features, which are now present on main:
 
 - `src/openenv/cli/commands/import_env.py`
 - `src/openenv/cli/importers/base.py`
