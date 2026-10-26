@@ -287,7 +287,7 @@ An ORS/OpenReward wrapper adapts one detected ORS environment class.
 
 Task discovery maps class methods into the optional task API:
 
-```python
+```text
 list_splits() -> list[dict]
 list_tasks(split: str) -> list[Any]
 num_tasks(split: str) -> int
