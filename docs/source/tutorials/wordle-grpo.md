@@ -37,7 +37,7 @@ with TextArenaEnv(base_url="https://openenv-wordle.hf.space").sync() as env:
     print(result.observation.messages[0].content)
 ```
 
-Install the client with `pip install "openenv-textarena @ git+https://github.com/huggingface/OpenEnv.git@v0.10.0#subdirectory=envs/textarena_env"`.
+Install the client with `pip install "openenv-textarena @ git+https://github.com/openenv/OpenEnv.git@v0.10.0#subdirectory=envs/textarena_env"`.
 
 Each guess returns the feedback for every letter: `G` (right letter, right spot), `Y` (in the word, wrong spot) and `X` (not in the word). A repeated word or a word that isn't English is an invalid move. The first one is a warning, and a second one in the same turn ends the game. A win ends with `Congratulations! You guessed the word correctly!`, and a loss shows the secret word.
 

@@ -3,7 +3,7 @@
 #     "transformers",
 #     "torch",
 #     "openenv==0.10.0",
-#     "openenv-textarena @ git+https://github.com/huggingface/OpenEnv.git@v0.10.0#subdirectory=envs/textarena_env",
+#     "openenv-textarena @ git+https://github.com/openenv/OpenEnv.git@v0.10.0#subdirectory=envs/textarena_env",
 # ]
 # ///
 """
