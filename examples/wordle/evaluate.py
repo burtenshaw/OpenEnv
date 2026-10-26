@@ -73,7 +73,9 @@ def play(model, tokenizer, env, args):
     # Same as TRL: the reset text is appended to the prompt with no separator.
     messages = [{"role": "user", "content": PROMPT + full}]
     rows, reward, done = [], 0.0, False
-    while not done and len(rows) < 6:
+    legal_guesses = 0
+    # Allow one invalid warning per legal guess, but bound nonterminating servers.
+    while not done and legal_guesses < 6 and len(rows) < 12:
         text = tokenizer.apply_chat_template(
             messages,
             tools=TOOLS,
@@ -100,8 +102,10 @@ def play(model, tokenizer, env, args):
         result = env.step(TextArenaAction(message=word))
         new_full = result.observation.messages[0].content
         feedback, full = new_full[len(full) :], new_full
+        invalid = "invalid move" in feedback.lower()
+        legal_guesses += not invalid
         reward, done = (
-            (0.0 if "invalid move" in feedback.lower() else result.reward or 0.0),
+            (0.0 if invalid else result.reward or 0.0),
             result.done,
         )
         match = FEEDBACK.search(feedback)
