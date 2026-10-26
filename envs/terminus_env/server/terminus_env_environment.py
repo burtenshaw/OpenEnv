@@ -88,8 +88,7 @@ class TerminusEnvironment(MCPEnvironment):
             step_count=0,
         )
         backend = str(
-            kwargs.get("sandbox_backend")
-            or os.getenv("TERMINUS_SANDBOX_BACKEND", "hf")
+            kwargs.get("sandbox_backend") or os.getenv("TERMINUS_SANDBOX_BACKEND", "hf")
         ).lower()
         sandbox_label = (
             "HF sandbox"
@@ -105,8 +104,7 @@ class TerminusEnvironment(MCPEnvironment):
                 metadata={
                     "status": "error",
                     "error": (
-                        f"failed to create {sandbox_label}: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"failed to create {sandbox_label}: {type(exc).__name__}: {exc}"
                     ),
                 },
             )
@@ -183,7 +181,10 @@ class TerminusEnvironment(MCPEnvironment):
     ) -> Observation:
         self._state.step_count += 1
         obs = super().step(action, timeout_s=timeout_s, **kwargs)
-        if self._state.submitted_answer is not None and self._state.last_reward is not None:
+        if (
+            self._state.submitted_answer is not None
+            and self._state.last_reward is not None
+        ):
             obs.done = True
             obs.reward = self._state.last_reward
         elif obs.reward is None:
@@ -198,7 +199,10 @@ class TerminusEnvironment(MCPEnvironment):
     ) -> Observation:
         self._state.step_count += 1
         obs = await super().step_async(action, timeout_s=timeout_s, **kwargs)
-        if self._state.submitted_answer is not None and self._state.last_reward is not None:
+        if (
+            self._state.submitted_answer is not None
+            and self._state.last_reward is not None
+        ):
             obs.done = True
             obs.reward = self._state.last_reward
         elif obs.reward is None:
@@ -253,8 +257,7 @@ def _coerce_commands(value: Any) -> list[str]:
 
 def _create_sandbox(kwargs: dict[str, Any]) -> Any:
     backend = str(
-        kwargs.get("sandbox_backend")
-        or os.getenv("TERMINUS_SANDBOX_BACKEND", "hf")
+        kwargs.get("sandbox_backend") or os.getenv("TERMINUS_SANDBOX_BACKEND", "hf")
     ).lower()
     if backend in {"local", "bwrap", "process"}:
         return LocalSandbox(root=kwargs.get("sandbox_root"))

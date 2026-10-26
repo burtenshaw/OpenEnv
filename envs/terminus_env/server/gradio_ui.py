@@ -87,7 +87,7 @@ _STYLE = """
 
 _EMPTY_TERMINAL = (
     "<div class='term-shell'><div class='term-empty'>"
-    "Reset the environment to create an HF sandbox, then run commands."
+    "Reset the environment to create a sandbox, then run commands."
     "</div></div>"
 )
 
@@ -202,7 +202,7 @@ def terminus_ui_builder(
     with gr.Blocks(title=f"{title} - Terminal") as demo:
         gr.Markdown(f"# {title}")
         gr.Markdown(
-            "Single-tool terminal environment backed by an HF sandbox. "
+            "Single-tool terminal environment backed by a sandbox. "
             "Reset creates a fresh session; commands run through `terminal(command=...)`."
         )
 
@@ -236,7 +236,7 @@ def terminus_ui_builder(
                     label="Terminal command",
                     value="pwd && ls -la",
                     lines=6,
-                    placeholder="Run shell commands in the HF sandbox",
+                    placeholder="Run shell commands in the sandbox",
                 )
                 run_btn = gr.Button("Run command", variant="primary")
 
@@ -280,7 +280,7 @@ def terminus_ui_builder(
             return (
                 _closed_terminal_html(),
                 {},
-                "Session closed. The HF sandbox was released.",
+                "Session closed. The sandbox was released.",
             )
 
         async def on_run(command: str):

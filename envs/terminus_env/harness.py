@@ -87,7 +87,9 @@ def _format_initial_prompt(result: Any, task: Any) -> str:
             _task_field(task, "instruction", "prompt", "question", "task", default="")
         )
         setup_commands = _coerce_commands(_task_field(task, "setup", "setup_scripts"))
-        verify_commands = _coerce_commands(_task_field(task, "verify", "verify_scripts"))
+        verify_commands = _coerce_commands(
+            _task_field(task, "verify", "verify_scripts")
+        )
     else:
         instruction = str(task or "")
         setup_commands = []
@@ -249,7 +251,9 @@ def _build_reset_kwargs(
     setup = list(default_setup)
     verify = list(default_verify)
     if isinstance(task, dict):
-        setup = _coerce_commands(_task_field(task, "setup", "setup_scripts", default=setup))
+        setup = _coerce_commands(
+            _task_field(task, "setup", "setup_scripts", default=setup)
+        )
         verify = _coerce_commands(
             _task_field(task, "verify", "verify_scripts", default=verify)
         )

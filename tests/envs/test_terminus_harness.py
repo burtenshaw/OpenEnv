@@ -14,17 +14,17 @@ from openenv.core.client_types import StepResult
 from openenv.core.env_server.mcp_types import CallToolAction, CallToolObservation
 from openenv.core.env_server.types import Observation
 from openenv.core.harness import (
+    build_harness_rollout_func,
     HarnessRunLimits,
     MCPHarnessAdapter,
     ModelStepResult,
     ResourceSessionFactory,
-    build_harness_rollout_func,
 )
 from openenv.core.llm_client import LLMResponse, ToolCall
 from terminus_env.harness import (
-    TerminusSessionFactory,
     build_terminal_tool_call,
     terminus_reward,
+    TerminusSessionFactory,
 )
 from terminus_env.models import CommandResult, TerminusState
 
@@ -155,7 +155,9 @@ def test_terminus_tool_calls_forward_environment_rewards():
 def test_terminus_terminal_json_parser():
     command = build_terminal_tool_call('{"command": "pytest -q"}')
     final_answer = build_terminal_tool_call('```json\n{"final_answer": "done"}\n```')
-    pi_command = build_terminal_tool_call('terminal(command="echo terminus > answer.txt")')
+    pi_command = build_terminal_tool_call(
+        'terminal(command="echo terminus > answer.txt")'
+    )
     pi_final_answer = build_terminal_tool_call("terminal(final_answer='done')")
     tool_call = build_terminal_tool_call(
         '<tool_call>{"name": "terminal", "arguments": "{\\"final_answer\\": '

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 
 class CommandResult(BaseModel):
-    """Outcome of one shell command run inside the HF sandbox."""
+    """Outcome of one shell command run inside the sandbox."""
 
     command: str
     output: str = ""
