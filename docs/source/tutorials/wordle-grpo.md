@@ -53,7 +53,7 @@ The environment's own reward is `1.0` for a win. A lost game scores (greens + ha
 
 Training Qwen3-1.7B with GRPO directly does not work well, for two reasons we saw in practice:
 
-- **The base model almost never wins.** It always opens with `apple` and soon repeats a word, so it wins around 2-3% of games while sampling. GRPO learns from the difference between good and bad games in a group, and with almost no wins there is little to learn from. A 25-step run from the base model stayed at a 2-5% win rate ([curve](https://huggingface.co/spaces/sergiopaniego/wordle-grpo-thinking), run `grpo-thinking-shaped`).
+- **The base model almost never wins.** It always opens with `apple` and soon repeats a word, so it wins around 2-3% of games while sampling. GRPO learns from the difference between good and bad games in a group, and with almost no wins there is little to learn from. A 25-step run from the base model stayed at a 2-5% win rate.
 - **The environment reward can be gamed.** A game only scores once it ends, and a win pays the same after 1 guess or 6. With Qwen3's long thinking, the easiest way to score more was to think less and use all 6 guesses. In one run, reasoning dropped from 7,000 to 2,300 tokens in 13 steps while the reward fell below where it started.
 
 So the recipe starts with a short SFT on well-played games, which teaches the format and a reasonable strategy. GRPO then trains against the environment, with a reward that pays for winning fast, and fixes what the SFT model still gets wrong.
