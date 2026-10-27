@@ -98,7 +98,7 @@ def main():
             Returns:
                 The feedback message from the environment.
             """
-            if self.done:
+            if self.done or self.num_guesses + self.invalid_moves >= 12:
                 raise ValueError("Game over.")
             result = self.client.step(TextArenaAction(message=guess))
             full_feedback = result.observation.messages[0].content
@@ -147,7 +147,9 @@ def main():
             mask_truncated_completions=True,
             # Multi-turn rollouts: clip per-token ratios instead of masking whole sequences.
             vllm_importance_sampling_mode="token_truncate",
-            max_tool_calling_iterations=6,
+            # Invalid warnings use tool rounds, but not legal guesses.
+            # The adapter caps submissions at 12; the environment still allows six legal guesses.
+            max_tool_calling_iterations=12,
             use_vllm=True,
             vllm_mode="colocate",
             vllm_gpu_memory_utilization=0.35,

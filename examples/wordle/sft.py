@@ -42,6 +42,8 @@ def main():
             learning_rate=1e-5,
             lr_scheduler_type="cosine",
             warmup_steps=3,
+            # Keep small weight updates in fp32 while computing in bf16.
+            model_init_kwargs={"dtype": "float32"},
             bf16=True,
             gradient_checkpointing=True,
             logging_steps=1,
@@ -55,7 +57,7 @@ def main():
         ),
     )
     trainer.train()
-    # Train in fp32 (bf16 weights lose the small updates), share the weights in bf16.
+    # Cast only after training, to share the weights in bf16.
     trainer.model.to(torch.bfloat16)
     trainer.push_to_hub(dataset_name=args.dataset)
 

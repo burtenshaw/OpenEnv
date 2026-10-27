@@ -12,7 +12,7 @@ This tutorial trains [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) to pla
 
 These numbers come from our run, with one training run per step, evaluated greedily on the same 30 words ([`secrets30.txt`](https://github.com/openenv/OpenEnv/blob/main/examples/wordle/secrets30.txt)). Thirty words is a small sample and training is not deterministic, so a new run will land a few wins away. Two SFT runs with the same recipe won 10 and 13 games, for example. Expect the same ordering (base, SFT, then SFT + GRPO clearly ahead) rather than the exact numbers.
 
-The GRPO run used an earlier version of the invalid-move penalty, which missed the invalid move that ends a game. The current `grpo.py` counts both.
+The GRPO run used an earlier version of the invalid-move penalty, which missed the invalid move that ends a game, and capped rollouts at six tool rounds, including invalid warnings. The current `grpo.py` counts terminal invalid moves and allows up to 12 tool rounds and 12 submissions, while the environment still ends games after six legal guesses. The reported results have not been regenerated with this corrected budget.
 
 The 30 words come from the 156 nouns TextArena draws its secrets from, the same list used for the SFT games and during GRPO. So the table measures how well each model plays the words of this environment. We did not test words outside that list.
 
@@ -86,7 +86,7 @@ hf jobs uv run --flavor a100-large --timeout 1h --secrets HF_TOKEN sft.py \
     --dataset <user>/wordle-tool-calls-sft --hub-model-id <user>/Qwen3-1.7B-Wordle-SFT
 ```
 
-In our run the loss went from 4.2 to 0.09. Train in full precision. When we loaded the weights in bf16 for training, the model came out clearly worse (final loss 0.21), because bf16 weights lose the small updates. The script casts the weights to bf16 only when it pushes the model.
+In our run the loss went from 4.2 to 0.09. Keep the trainable weights in fp32, with bf16 mixed-precision compute. When we loaded the weights in bf16 for training, the model came out clearly worse (final loss 0.21), because bf16 weights lose the small updates. The script sets `model_init_kwargs={"dtype": "float32"}` explicitly (also the default in TRL 1.16.0) and keeps `bf16=True` for compute. It casts the weights to bf16 after training, just before the final upload.
 
 ## 5. GRPO
 
