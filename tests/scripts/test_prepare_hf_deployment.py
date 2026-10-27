@@ -363,7 +363,7 @@ def test_prepare_hf_deployment_keeps_the_env_description_first(tmp_path: Path) -
     [
         ("false", "--public", None),
         ("true", "--private", None),
-        ("true", "--public", "--no-private"),
+        ("true", "--public", "--public"),
         ("false", "--private", "--private"),
     ],
 )
@@ -373,8 +373,8 @@ def test_prepare_hf_deployment_updates_visibility_only_when_it_differs(
     visibility_flag: str,
     expected_settings_call: str | None,
 ) -> None:
-    """`hf repo settings` fails on an update that changes nothing, so a Space that
-    already has the requested visibility must not get one."""
+    """`hf repos settings` fails on an update that changes nothing and ignores
+    `--no-private`, so it only runs when visibility differs, with `--public`."""
     repo_root = Path(__file__).resolve().parents[2]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -386,9 +386,10 @@ def test_prepare_hf_deployment_updates_visibility_only_when_it_differs(
         'if [ "$1 $2" = "spaces info" ]; then\n'
         f'    echo \'{{"id": "openenv/echo_env", "private": {current_private}}}\'\n'
         "fi\n"
-        'if [ "$1 $2" = "repo settings" ]; then\n'
+        'if [ "$1 $2" = "repos settings" ]; then\n'
         f'    [ "{current_private}" = true ] && [[ " $* " == *" --private "* ]] && exit 1\n'
-        f'    [ "{current_private}" = false ] && [[ " $* " == *" --no-private "* ]] && exit 1\n'
+        f'    [ "{current_private}" = false ] && [[ " $* " == *" --public "* ]] && exit 1\n'
+        '    [[ " $* " == *" --no-private "* ]] && exit 1\n'
         "fi\n"
         "exit 0\n"
     )
@@ -423,7 +424,7 @@ def test_prepare_hf_deployment_updates_visibility_only_when_it_differs(
     settings_calls = [
         line
         for line in calls.read_text().splitlines()
-        if line.startswith("repo settings")
+        if line.startswith("repos settings")
     ]
     if expected_settings_call is None:
         assert settings_calls == []

@@ -788,8 +788,9 @@ deploy_env() {
         "$stage_dir" \
         . || return 1
 
-    # Ensure visibility is applied even when repo already existed. `hf repo settings`
-    # rejects an update that changes nothing, so only call it when visibility differs.
+    # Ensure visibility is applied even when repo already existed. `hf repos settings`
+    # rejects an update that changes nothing (and ignores `--no-private`), so only call
+    # it when visibility differs, with `--public` to make a Space public.
     local space_info
     if [ ${#TOKEN_ARGS[@]} -gt 0 ]; then
         space_info=$(hf spaces info "$space_repo" --expand=private --format json "${TOKEN_ARGS[@]}") || return 1
@@ -803,12 +804,12 @@ deploy_env() {
     if [ "$current_private" != "$PRIVATE" ]; then
         local privacy_flag="--private"
         if [ "$PRIVATE" = false ]; then
-            privacy_flag="--no-private"
+            privacy_flag="--public"
         fi
         if [ ${#TOKEN_ARGS[@]} -gt 0 ]; then
-            hf repo settings --repo-type space "$privacy_flag" "${TOKEN_ARGS[@]}" "$space_repo" || return 1
+            hf repos settings --repo-type space "$privacy_flag" "${TOKEN_ARGS[@]}" "$space_repo" || return 1
         else
-            hf repo settings --repo-type space "$privacy_flag" "$space_repo" || return 1
+            hf repos settings --repo-type space "$privacy_flag" "$space_repo" || return 1
         fi
     fi
 
