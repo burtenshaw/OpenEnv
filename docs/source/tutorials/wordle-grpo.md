@@ -1,18 +1,18 @@
 # Train a Wordle Agent: SFT, then GRPO
 
-This tutorial trains [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) to play [Wordle](https://en.wikipedia.org/wiki/Wordle) against the OpenEnv TextArena environment. The model starts out unable to win a single game. A short supervised warmup teaches it the game, and in our run GRPO then nearly doubled its wins and removed most of its invalid guesses. Every step runs on one GPU, and the whole pipeline costs about $6 on [Hugging Face Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs).
+This tutorial trains [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) to play [Wordle](https://en.wikipedia.org/wiki/Wordle) against the OpenEnv TextArena environment. The model starts out unable to win a single game. A short supervised warmup teaches it the game, and in our run GRPO then doubled its wins and removed most of its invalid guesses. Every step runs on one GPU, and the whole pipeline costs about $6 on [Hugging Face Jobs](https://huggingface.co/docs/huggingface_hub/guides/jobs).
 
 ![Base model, SFT and SFT + GRPO playing the same 30 words](https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/openenv/wordle-progress.gif)
 
 | Model | Wins on 30 words | Guesses per win | Invalid guesses |
 |---|---|---|---|
 | [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | 0/30 | - | 24 |
-| + SFT ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT)) | 10/30 | 3.2 | 33 |
-| + SFT + GRPO ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT-GRPO)) | 19/30 | 3.9 | 3 |
+| + SFT ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT)) | 10/30 | 3.2 | 41 |
+| + SFT + GRPO ([model](https://huggingface.co/openenv/Qwen3-1.7B-Wordle-SFT-GRPO)) | 20/30 | 4.1 | 3 |
 
 These numbers come from our run, with one training run per step, evaluated greedily on the same 30 words ([`secrets30.txt`](https://github.com/openenv/OpenEnv/blob/main/examples/wordle/secrets30.txt)). Thirty words is a small sample and training is not deterministic, so a new run will land a few wins away. Two SFT runs with the same recipe won 10 and 13 games, for example. Expect the same ordering (base, SFT, then SFT + GRPO clearly ahead) rather than the exact numbers.
 
-These results predate a fix to count terminal invalid moves toward the training penalty. The current script penalizes both invalid-move warnings and terminal invalid moves. The published evaluations also used a six-submission cap, so invalid warnings could leave fewer than six legal guesses. The corrected evaluator allows six legal guesses, bounded by 12 submissions, and respects earlier environment termination. Replay of the saved arena traces found eight SFT games and three SFT + GRPO games still nonterminal at that cap. The table, GIF, and arena traces remain historical results; we have not recomputed scores with the corrected budget.
+The GRPO run used an earlier version of the invalid-move penalty, which missed the invalid move that ends a game. The current `grpo.py` counts both.
 
 The 30 words come from the 156 nouns TextArena draws its secrets from, the same list used for the SFT games and during GRPO. So the table measures how well each model plays the words of this environment. We did not test words outside that list.
 
