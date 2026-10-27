@@ -22,6 +22,8 @@ BrowserGym is a unified framework for web-based agent tasks that provides access
 
 *The `/web` playground on MiniWoB `click-test`: the goal, the page URL and the browser screenshot (screenshots on, 320×240 viewport).*
 
+Try it on the [`openenv/browsergym_env`](https://huggingface.co/spaces/openenv/browsergym_env) Space, or connect a client to `https://openenv-browsergym-env.hf.space`.
+
 ## Why BrowserGym?
 
 BrowserGym provides a complete pipeline for developing web agents: train on simple tasks, then evaluate on realistic websites.
