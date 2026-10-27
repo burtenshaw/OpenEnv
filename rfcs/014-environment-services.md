@@ -5,7 +5,7 @@
 **Authors**: @rycerzes
 **RFC ID**: 014
 
-Discussion: [#1382](https://github.com/openenv/OpenEnv/issues/1382). Prototype: [`envs/posttrain_env`](../envs/posttrain_env/).
+Discussion: [#1382](https://github.com/openenv/OpenEnv/issues/1382). Prototype: [experimental `posttrain_env` PR #1500](https://github.com/openenv/OpenEnv/pull/1500).
 
 ## Summary
 
@@ -67,7 +67,7 @@ services:
 budget: {usd: 3.0, scope: rollout}
 ```
 
-`posttrain_env` keeps this in its task definitions (`server/tasks.py`); the manifest becomes a core type in step 2 of the plan below.
+`posttrain_env` keeps this in its task definitions (`server/tasks.py`); a possible core manifest is deferred to step 2, after the provider contract and second backend have been validated.
 
 **Service profiles (v1).**
 
@@ -83,9 +83,14 @@ Every observation carries a stable spend entry. It is for accounting, and for bu
 ```python
 obs.metadata["service_spend"] = {
     "version": 1,
-    "settled": {"usd": 0.62, "gpu_s": 410.0, "jobs": 2, "calls": 1},  # cumulative for the episode
+    "settled": {
+        "usd": 0.62,
+        "gpu_s": 410.0,
+        "jobs": 2,
+        "calls": 1,
+    },  # cumulative for the episode
     "reserved": {"usd": 0.0},  # open reservations; empty once every job has settled
-    "final": True,             # false while a job is live or was orphaned
+    "final": True,  # false while a job is live or was orphaned
 }
 ```
 
@@ -95,9 +100,44 @@ v1 reports `usd`, `gpu_s`, `jobs` and `calls`. `jobs` counts agent jobs and `cal
 
 **Network.** Agent jobs run without network access. A job that can reach the internet can download a model already trained for the task, or the evaluation's own test data; [PostTrainBench](https://arxiv.org/abs/2603.08640) reports both. Inputs come as read-only mounts instead: the task's base model at a pinned revision, and the public, ungated Hub datasets the agent names, at their current revision, minus a per-task denylist. Packages are installed into a fresh venv from wheels only, which runs none of their code, before the agent's code runs. HF Jobs has no egress control, and its containers can't create network namespaces or firewall rules (checked on `cpu-basic` and `a10g-small`). So `posttrain_env` runs the agent's script inside a launcher that installs a seccomp filter refusing every socket except `AF_UNIX`, and io_uring and cross-process memory access, then closes inherited file descriptors and drops to a uid no other process in the job uses; systemd's `RestrictAddressFamilies=` works the same way. This limits a job to declared, recorded inputs, but doesn't make them clean: a public dataset or a PyPI wheel can still hold weights or test data. Tasks whose test data is public also need a contamination check after the run.
 
-**Evaluator.** Two endpoints. `dev_evaluate` runs on the public dev split, is rate-limited and charged to the agent, and returns at most five metrics and short feedback. `score` runs on the hidden split as a grader-only job and is the reward; the hidden split's seed reaches it as a secret. Both run the environment's evaluator script as their own job, with the artifact under test mounted read-only. The evaluator prints one `POSTTRAIN_SCORE {"score": ...}` line; a checkpoint it can't use scores 0 as `invalid`. The evaluator takes only data from the artifact, never code or anything that shapes the evaluator's own input: `t0_arithmetic_format` loads safetensors weights into the base model's config, with the base tokenizer, chat template and generation settings from the base model mount, since a chat template could compute the answer into the prompt. Its dependencies are pinned too, so scores don't change with a new release. A score job that fails, times out, is cancelled or prints no valid score ends the episode unscored (`reward` is `None`, `episode_end.reason` is `score_failed`): the fault is the grader's, and RFC 013's `update` takes `None` for a rollout the environment did not score, which samplers leave out rather than count as zero.
+**Evaluator.** Two endpoints. `dev_evaluate` runs on the public dev split, is rate-limited and charged to the agent, and returns at most five metrics and short feedback. `score` runs on the hidden split as a grader-only job and is the reward; the hidden split's seed reaches it as a secret. Both run the environment's evaluator script as their own job, with the artifact under test mounted read-only. The evaluator prints one `POSTTRAIN_SCORE {"score": ...}` line; a checkpoint it can't use scores 0 as `invalid`. The evaluator takes only data from the artifact, never code or anything that shapes the evaluator's own input: `t0_arithmetic_format` loads safetensors weights into the base model's config, with the base tokenizer, chat template and generation settings from the base model mount, since a chat template could compute the answer into the prompt. Its dependencies are pinned too, so scores don't change with a new release. A score job that fails, times out, is cancelled or prints no valid score ends the episode unscored (`reward` is `None`, `episode_end.reason` is `score_failed`): the fault is the grader's, and RFC 013's `update` takes `None` for a rollout the environment did not score, which samplers leave out rather than count as zero. This `None`-reward integration depends on acceptance of RFC 013 (#1256) and must follow its final unscored-rollout semantics; it is not an independently accepted core contract.
 
 **Artifacts.** An artifact is the output folder of a succeeded job, exposed as `openenv-artifact://<episode>/<job>/outputs` with each file's path, size and content hash. Graders mount the folder read-only; nothing is copied through the agent.
+
+### Minimal batch-job provider contract (proposed)
+
+HF Jobs is the first implementation, not the definition of the interface. A
+provider must offer these operations to the broker, without exposing its
+credentials to agent code:
+
+- **Submit**: accept a workload, resource choice, deadline and declared inputs;
+  return a stable job handle and support reconciliation of ambiguous submissions
+  without duplicate work or spend.
+- **Inspect**: report state and execution duration/usage for settlement, including
+  terminal failures and pending cancellation.
+- **Cancel**: request termination and allow confirmation of a terminal state;
+  an unconfirmed cancellation remains an orphan that may still bill.
+- **Logs**: read bounded diagnostics for the episode's own jobs, separately from
+  the authoritative evaluator result.
+- **Price**: expose units, billing granularity and a conservative cost bound that
+  can be reserved before execution, then settled from observed usage.
+- **Artifacts**: enumerate outputs and their identity/size, and provide read-only
+  access to an isolated grader without passing credentials through the agent.
+
+Per-minute billing, `run_uv_job`, the `jobs-artifacts` bucket, Resource Group
+caps and the seccomp launcher are HF implementation choices. Other providers
+must preserve reservations, credential/grader separation and no-network agent
+execution using their own facilities.
+
+**Prerequisite before step 2:** sketch and validate this contract against a
+second backend before proposing core types or reserved names. A local Docker
+backend is proposed for no-spend end-to-end tests: container handles and inspect,
+stop, logs, isolated output volumes, and an explicit local resource-price policy
+would exercise these operations. Modal is another proposed check against
+HF-shaped assumptions, especially network isolation. Neither backend is
+implemented or adopted by this RFC. Native provider no-network support remains
+a prerequisite for step 2; track HF support in
+[huggingface_hub#5261](https://github.com/huggingface/huggingface_hub/issues/5261).
 
 ### Key Design Decisions
 
@@ -117,7 +157,7 @@ v1 reports `usd`, `gpu_s`, `jobs` and `calls`. `jobs` counts agent jobs and `cal
 #### D3. Tool names use an underscore prefix
 
 - **Chosen approach**: `jobs_submit`, `jobs_status`, `jobs_wait`, `jobs_logs`, `jobs_cancel`, `dev_evaluate`, `submit` and `budget`.
-- **Rationale**: OpenAI-compatible function names allow only `[a-zA-Z0-9_-]`, and most trainers convert MCP tools to that form, so `jobs.submit` breaks them. The reserved-name prefix rule in core (step 2) covers `jobs_`.
+- **Rationale**: OpenAI-compatible function names allow only `[a-zA-Z0-9_-]`, and most trainers convert MCP tools to that form, so `jobs.submit` breaks them. These are prototype names only. Any reserved-name prefix rule in core is deferred until the provider contract and a second backend have been validated before step 2.
 
 #### D4. Long calls block with a declared timeout
 
@@ -143,26 +183,89 @@ v1 reports `usd`, `gpu_s`, `jobs` and `calls`. `jobs` counts agent jobs and `cal
 `posttrain_env` with task `t0_arithmetic_format`, driven by any agent loop:
 
 ```python
+from openenv.core.env_server.mcp_types import CallToolAction
 from posttrain_env import PostTrainEnv
 
-with PostTrainEnv(base_url="http://localhost:8000", message_timeout_s=3600).sync() as env:
+with PostTrainEnv(
+    base_url="http://localhost:8000", message_timeout_s=3600
+).sync() as env:
     result = env.reset(task_id="t0_arithmetic_format")
     print(result.observation.metadata["prompt"])
-    print(env.call_tool("budget"))
-    # {'remaining_usd': 3.0, 'flavors': {'t4-small': {'usd_per_hour': 0.4}, ...}, 'jobs_left': 6, ...}
+    result = env.step(CallToolAction(tool_name="budget", arguments={}))
+    print(result.observation.result["data"])
 
-    job = env.call_tool("jobs_submit", script=train_py, flavor="t4-small", timeout_minutes=30)
-    status = env.call_tool("jobs_wait", job_id=job["job_id"], timeout_s=300)
-    # {'state': 'succeeded', 'cost_usd': 0.04,
-    #  'artifact': {'uri': 'openenv-artifact://<episode>/<job>/outputs', 'files': [...]}}
+    result = env.step(
+        CallToolAction(
+            tool_name="jobs_submit",
+            arguments={
+                "script": train_py,
+                "flavor": "t4-small",
+                "timeout_minutes": 30,
+            },
+        )
+    )
+    assert result.observation.error is None
+    job = result.observation.result["data"]
+    assert "error" not in job, job
+    status = "queued"
+    while status in {"queued", "running"}:
+        result = env.step(
+            CallToolAction(
+                tool_name="jobs_wait",
+                arguments={
+                    "job_id": job["job_id"],
+                    "timeout_s": 300,
+                },
+            )
+        )
+        assert not result.done, result.observation.metadata
+        status = result.observation.result["data"]["state"]
+    assert status == "succeeded", result.observation.result
 
-    dev = env.call_tool("dev_evaluate", job_id=job["job_id"])
-    env.call_tool("jobs_wait", job_id=dev["job_id"], timeout_s=300)  # result: {'score': ...}
+    dev = env.step(
+        CallToolAction(
+            tool_name="dev_evaluate",
+            arguments={
+                "job_id": job["job_id"],
+            },
+        )
+    )
+    dev_job = dev.observation.result["data"]
+    assert "error" not in dev_job, dev_job
+    status = "queued"
+    while status in {"queued", "running"}:
+        result = env.step(
+            CallToolAction(
+                tool_name="jobs_wait",
+                arguments={
+                    "job_id": dev_job["job_id"],
+                    "timeout_s": 300,
+                },
+            )
+        )
+        assert not result.done, result.observation.metadata
+        status = result.observation.result["data"]["state"]
+    assert status == "succeeded", result.observation.result
+    print(result.observation.result["data"]["result"])
 
-    final = env.call_tool("submit", job_id=job["job_id"])  # ends the episode; reward = hidden-split score
+    final = env.step(
+        CallToolAction(
+            tool_name="submit",
+            arguments={
+                "job_id": job["job_id"],
+            },
+        )
+    )
+    print(final.done, final.reward, final.observation.metadata["service_spend"])
 ```
 
-The final observation carries `reward`, `metadata["service_spend"]` and `metadata["episode_end"]`.
+The final step result carries `reward`, and its observation carries
+`metadata["service_spend"]` and `metadata["episode_end"]`. Direct `call_tool`
+uses `/mcp`, bypasses episode step/time limits and does not return this final
+step observation; core enforcement is tracked in [#1507](https://github.com/openenv/OpenEnv/issues/1507).
+`service_spend["final"]` means all jobs have settled, not that the episode ended.
+`submit` blocks for up to reset metadata's `score_timeout_s` (2700 s for this
+task), so allow additional cancellation/transport time in client deadlines.
 
 ## Prototype results
 
@@ -185,8 +288,8 @@ Spend is the agent's HF Jobs spend; LLM tokens are not included. Every run ended
 
 ## Plan
 
-1. **This PR**: the RFC and `envs/posttrain_env`, with no core changes and no network in agent jobs. Two T0 tasks that check the plumbing: `t0_artifact` for a fraction of a cent, and `t0_arithmetic_format`, a small SFT task with a hidden test split.
-2. **Core types**: manifest, ledger, job and artifact models outside `server/`; the reserved-name prefix rule for `jobs_`; cleanup that surfaces cancel failures (`_cleanup_session_resources` swallows errors today) and the idle reaper on when services are declared.
+1. **Separate design and prototype PRs**: this PR contains only RFC 014 and its index entry; [#1500](https://github.com/openenv/OpenEnv/pull/1500) contains experimental `posttrain_env`, with no core changes and no network in agent jobs. Two T0 tasks that check the plumbing: `t0_artifact` for a fraction of a cent, and `t0_arithmetic_format`, a small SFT task with a hidden test split.
+2. **Proposed core types, after prerequisites**: first validate the provider contract with a second backend and obtain native no-network support. Only then propose manifest, ledger, job and artifact models outside `server/`, any reserved-name prefix rule, cleanup that surfaces cancel failures and an idle reaper for declared services, in a separate PR. None of these core changes or names is adopted here.
 3. **openenvd integration** (RFC 009): credential custody and the grader zone.
 
 ## Future Work
@@ -211,6 +314,6 @@ Also: shared brokers outside the environment with per-rollout tokens ([RFC 8693]
 ## Related
 
 - RFC 009 openenvd (#1053, #1354, #1355): the base for credential custody and the grader zone.
-- RFC 013 task sampling (#1256): `service_spend` is one source of the trainer's `costs`, never a sampling weight; an unscored episode's `None` reward is left out of the sampler's estimates.
+- RFC 013 task sampling (#1256): `service_spend` is one source of the trainer's `costs`, never a sampling weight; the proposed treatment of an unscored episode's `None` reward depends on RFC 013 acceptance and its final semantics.
 - RFC 004: `score` feeds rubrics. RFC 005/006: LLM proxying is the future model-call profile. RFC 008: contract checks for declared services, plus #1357's adversarial panel. RFC 012: separate-verifier precedent.
 - Issues: #898, #1026, #1232, #1299, #1357, #779.
