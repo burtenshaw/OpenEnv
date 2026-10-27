@@ -16,7 +16,7 @@ The GRPO run used an earlier version of the invalid-move penalty, which missed t
 
 The 30 words come from the 156 nouns TextArena draws its secrets from, the same list used for the SFT games and during GRPO. So the table measures how well each model plays the words of this environment. We did not test words outside that list.
 
-Watch all three play any of the 30 words in the [Wordle Arena](https://huggingface.co/spaces/openenv/wordle-arena) Space, and see the training curves on [Trackio](https://huggingface.co/spaces/sergiopaniego/openenv-wordle-runs). The scripts are in [`examples/wordle`](https://github.com/openenv/OpenEnv/tree/main/examples/wordle).
+Watch all three play any of the 30 words in the [Wordle Arena](https://huggingface.co/spaces/openenv/wordle-arena) Space, and see the training curves on [Trackio](https://huggingface.co/spaces/openenv/wordle-runs). The scripts are in [`examples/wordle`](https://github.com/openenv/OpenEnv/tree/main/examples/wordle).
 
 ## What you need
 
