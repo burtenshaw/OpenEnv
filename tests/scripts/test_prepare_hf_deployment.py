@@ -317,7 +317,7 @@ def test_prepare_hf_deployment_pins_release_tag_not_matching_branch(
     pyproject_text = (
         staging_dir / "test" / "echo_env-0.8.0" / "pyproject.toml"
     ).read_text()
-    assert '"openenv @ git+https://github.com/huggingface/OpenEnv.git@v0.8.0"' in (
+    assert '"openenv @ git+https://github.com/openenv/OpenEnv.git@v0.8.0"' in (
         pyproject_text
     )
 

@@ -135,7 +135,7 @@ normalized_version_suffix() {
 
 resolve_openenv_git_ref() {
     local requested_ref="$1"
-    local repo_url="https://github.com/huggingface/OpenEnv.git"
+    local repo_url="https://github.com/openenv/OpenEnv.git"
     local candidate=""
     local resolved=""
 
@@ -376,13 +376,13 @@ pin_openenv_refs_in_pyproject() {
     # so release-candidate deployments test the requested OpenEnv ref instead
     # of silently resolving an older PyPI package.
     sed_inplace \
-        "/^[[:space:]]*\"/ s|git+https://github.com/huggingface/OpenEnv.git@main|git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF|g" \
+        "/^[[:space:]]*\"/ s|git+https://github.com/openenv/OpenEnv.git@main|git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF|g" \
         "$file_path"
     sed_inplace \
-        "/^[[:space:]]*\"/ s|git+https://github.com/huggingface/OpenEnv.git\"|git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
+        "/^[[:space:]]*\"/ s|git+https://github.com/openenv/OpenEnv.git\"|git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
         "$file_path"
     sed_inplace \
-        "/^[[:space:]]*\"/ s|\"openenv[<>=~! @][^\"]*\"|\"openenv @ git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
+        "/^[[:space:]]*\"/ s|\"openenv[<>=~! @][^\"]*\"|\"openenv @ git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
         "$file_path"
 }
 
@@ -425,16 +425,16 @@ create_environment_dockerfile() {
     fi
 
     sed_inplace \
-        "s|git+https://github.com/huggingface/OpenEnv.git@main|git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF|g" \
+        "s|git+https://github.com/openenv/OpenEnv.git@main|git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF|g" \
         "$stage_dir/Dockerfile"
     sed_inplace \
-        "s|git+https://github.com/huggingface/OpenEnv.git\"|git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
+        "s|git+https://github.com/openenv/OpenEnv.git\"|git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
         "$stage_dir/Dockerfile"
     sed_inplace \
-        "s|git+https://github.com/huggingface/OpenEnv.git$|git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF|g" \
+        "s|git+https://github.com/openenv/OpenEnv.git$|git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF|g" \
         "$stage_dir/Dockerfile"
     sed_inplace \
-        "s|\"openenv[<>=~! @][^\"]*\"|\"openenv @ git+https://github.com/huggingface/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
+        "s|\"openenv[<>=~! @][^\"]*\"|\"openenv @ git+https://github.com/openenv/OpenEnv.git@$OPENENV_GIT_REF\"|g" \
         "$stage_dir/Dockerfile"
 
     # Some base images include older uv versions that fail on a subset of env
